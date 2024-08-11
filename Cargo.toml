@@ -1,0 +1,11 @@
+[package]
+name = "ruse"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+name-variant = "0.1.0"
+owo-colors = "4.0.0"
+ariadne = { version = "0.4.1", features = ["auto-color"] }
