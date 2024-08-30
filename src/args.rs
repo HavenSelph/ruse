@@ -27,7 +27,7 @@ macro_rules! error {
         ArgsError(format!($($ident)*))
             .make(crate::span::Span::empty())
             .finish()
-            .eprint(ReportConfig::default());
+            .print(ReportConfig::default());
         exit(1);
     };
 }

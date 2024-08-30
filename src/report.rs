@@ -1,13 +1,13 @@
 #![allow(unused)]
 
 use std::fmt::Display;
+use std::io::Write;
 use std::sync::mpsc::{Receiver, Sender};
 
 use ariadne::{Color, Config};
 use owo_colors::OwoColorize;
 
 use crate::args::ARGS;
-use crate::dprintln;
 use crate::files::ScannerCache;
 use crate::span::Span;
 
@@ -87,7 +87,7 @@ impl<T> UnwrapReport<T> for Result<T> {
         match self {
             Ok(val) => val,
             Err(err) => {
-                err.finish().eprint(ARGS.config());
+                err.finish().print(ARGS.config());
                 std::process::exit(1);
             }
         }
@@ -99,7 +99,7 @@ impl<T> UnwrapReport<T> for ResultFinal<T> {
         match self {
             Ok(val) => val,
             Err(err) => {
-                err.eprint(ARGS.config());
+                err.print(ARGS.config());
                 std::process::exit(1);
             }
         }
@@ -280,22 +280,18 @@ impl Report {
         builder.finish()
     }
 
-    pub fn eprint(self, config: ReportConfig) {
+    pub fn write<W: std::io::Write>(self, dst: W, config: ReportConfig) {
+        let (empty, help, note) = (self.labels.is_empty(), self.help.clone(), self.note.clone());
+        self.into_ariadne_report(config)
+            .write(ScannerCache {}, dst)
+            .expect("Failed to print error.")
+    }
+
+    pub fn print(self, config: ReportConfig) {
         let (empty, help, note) = (self.labels.is_empty(), self.help.clone(), self.note.clone());
         self.into_ariadne_report(config)
             .eprint(ScannerCache {})
-            .expect("Failed to print error.");
-        if config.compact {
-            return;
-        }
-        if empty {
-            if let Some(help) = help {
-                eprintln!("{}", help);
-            }
-            if let Some(note) = note {
-                eprintln!("{}", note)
-            }
-        }
+            .expect("Failed to print error.")
     }
 }
 
@@ -329,20 +325,24 @@ impl ReportChannel {
 
     pub fn check_reports(&self) {
         let mut errors = 0usize;
+        let mut buffer: Vec<u8> = Vec::new();
         for report in self.receiver.try_iter() {
             if report.level == ReportLevel::Error {
                 errors += 1;
             }
-            dprintln!("Report({},{:?})", report.title, report.span);
             if ARGS.report_level.to_value() < report.level {
                 continue;
             }
-            report.eprint(ARGS.config())
+            if ARGS.debug.to_value() {
+                writeln!(buffer, "Report[{}]", report.span);
+            }
+            report.write(&mut buffer, ARGS.config());
         }
         if errors > 0 {
             if ARGS.report_level.to_value() != ReportLevel::Silent {
                 eprint!(
-                    "{}",
+                    "{}{}",
+                    std::str::from_utf8(&buffer).unwrap(),
                     format_args!("Failed with {errors} errors emitted.").red()
                 );
             }
