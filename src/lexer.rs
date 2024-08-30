@@ -1,8 +1,46 @@
-use ariadne::Color;
+use std::fmt::{Display, Formatter};
+use std::iter::FusedIterator;
 
-use crate::report::{Report, ReportKind, ReportSender, Result, SpanToLabel};
+use ariadne::Color;
+use name_variant::NamedVariant;
+
+use LexerReport::*;
+
+use crate::files::get_source;
+use crate::report::{ReportKind, ReportLevel, Result, SpanToLabel, UnwrapReport};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
+
+#[derive(NamedVariant)]
+enum LexerReport {
+    SyntaxError,
+    UnterminatedString,
+    UnterminatedComment,
+    UnexpectedCharacter(char),
+}
+
+impl Display for LexerReport {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.variant_name())?;
+        match self {
+            UnexpectedCharacter(c) => write!(f, ": {c}")?,
+            _ => (),
+        }
+        Ok(())
+    }
+}
+
+impl From<LexerReport> for ReportLevel {
+    fn from(value: LexerReport) -> Self {
+        match value {
+            SyntaxError | UnterminatedString | UnterminatedComment | UnexpectedCharacter(_) => {
+                Self::Error
+            }
+        }
+    }
+}
+
+impl ReportKind for LexerReport {}
 
 pub struct Lexer<'contents> {
     filename: &'static str,
@@ -10,27 +48,20 @@ pub struct Lexer<'contents> {
     char_indices: std::iter::Peekable<std::str::CharIndices<'contents>>,
     current_char: Option<char>,
     current_index: usize,
-    pub tokens: Vec<Token<'contents>>,
-    reporter: ReportSender,
 }
 
 impl<'contents> Lexer<'contents> {
-    pub fn new(filename: &'static str, source: &'contents str, reporter: ReportSender) -> Self {
+    pub fn new(filename: &'static str) -> Self {
+        let source = get_source(filename).unwrap_report().text();
         let mut lexer = Self {
             filename,
             source,
             char_indices: source.char_indices().peekable(),
             current_char: None,
             current_index: 0,
-            tokens: Vec::new(),
-            reporter,
         };
         lexer.advance();
         lexer
-    }
-
-    fn report(&mut self, report: Box<Report>) {
-        self.reporter.report(report);
     }
 
     fn advance(&mut self) {
@@ -44,23 +75,33 @@ impl<'contents> Lexer<'contents> {
     fn peek_char(&mut self) -> Option<&char> {
         self.peek().map(|(_, c)| c)
     }
-    fn push(&mut self, start: usize, end: usize, token_kind: TokenKind, text: &'contents str) {
-        self.tokens
-            .push(Token::new(token_kind, self.span_from(start), text));
+    fn make(
+        &mut self,
+        start: usize,
+        end: usize,
+        token_kind: TokenKind,
+        text: &'contents str,
+    ) -> Result<Token<'contents>> {
+        Ok(Token::new(token_kind, self.span(start, end), text))
     }
-    fn push_simple(&mut self, start: usize, token_kind: TokenKind) {
-        self.push(
+    fn make_simple(&mut self, start: usize, token_kind: TokenKind) -> Result<Token<'contents>> {
+        self.make(
             start,
             self.current_index,
             token_kind,
             self.slice(start, self.current_index),
-        );
+        )
     }
-    fn push_advance(&mut self, start: usize, i: usize, token_kind: TokenKind) {
+    fn make_advance(
+        &mut self,
+        start: usize,
+        i: usize,
+        token_kind: TokenKind,
+    ) -> Result<Token<'contents>> {
         for _ in 0..i {
             self.advance();
         }
-        self.push_simple(start, token_kind);
+        self.make_simple(start, token_kind)
     }
 
     fn span(&self, start: usize, end: usize) -> Span {
@@ -81,23 +122,21 @@ impl<'contents> Lexer<'contents> {
         &self.source[start..end]
     }
 
-    pub fn lex(&mut self) {
-        macro_rules! report {
-            ($result:expr) => {
-                match $result {
-                    Ok(v) => v,
-                    Err(e) => {
-                        self.report(e.finish().into());
-                        continue;
-                    }
-                }
+    pub fn lex_token(&mut self) -> Result<Token<'contents>> {
+        loop {
+            let Some(char) = self.current_char else {
+                return Ok(Token::new(
+                    TokenKind::EOF,
+                    self.span_from(self.current_index),
+                    "",
+                ));
             };
-        }
-
-        while let Some(char) = self.current_char {
             let start = self.current_index;
-            match char {
-                c if c.is_whitespace() => self.advance(),
+            return match char {
+                c if c.is_whitespace() => {
+                    self.advance();
+                    continue;
+                }
                 'a'..='z' | 'A'..='Z' | '_' => {
                     loop {
                         match self.current_char {
@@ -110,7 +149,7 @@ impl<'contents> Lexer<'contents> {
                         "True" | "False" => TokenKind::BooleanLiteral,
                         _ => TokenKind::Identifier,
                     };
-                    self.push_simple(start, kind);
+                    self.make_simple(start, kind)
                 }
                 '0' if self.peek_char().is_some_and(|c| "box".contains(*c)) => {
                     self.advance();
@@ -121,23 +160,22 @@ impl<'contents> Lexer<'contents> {
                         _ => unreachable!(),
                     };
                     self.advance();
-                    report!(self.lex_integer(start, base));
-                    self.push_simple(start + 2, base.into());
+                    self.lex_integer(start, base)?;
+                    self.make_simple(start + 2, base.into())
                 }
                 '0'..='9' => {
-                    report!(self.lex_integer(start, Base::Decimal));
+                    self.lex_integer(start, Base::Decimal)?;
                     if let Some('.') = self.current_char {
                         self.advance();
-                        report!(self.lex_integer(start, Base::Decimal));
+                        self.lex_integer(start, Base::Decimal)?;
                         if let Some('.') = self.current_char {
-                            self.report(
-                                ReportKind::InvalidFloatLiteral
-                                    .make(self.span_at(self.current_index))
-                                    .with_message("Second decimal point")
-                                    .finish()
-                                    .into(),
-                            );
-                            continue;
+                            return Err(SyntaxError
+                                .make(self.span_at(self.current_index))
+                                .with_message("Second decimal place in float")
+                                .with_label(
+                                    self.span_from(start).label().with_color(Color::BrightBlue),
+                                )
+                                .into());
                         }
                     }
                     let kind = if self.slice(start, self.current_index).contains('.') {
@@ -145,33 +183,34 @@ impl<'contents> Lexer<'contents> {
                     } else {
                         TokenKind::IntegerLiteralDec
                     };
-                    self.push_simple(start, kind);
+                    self.make_simple(start, kind)
                 }
                 '"' | '\'' => {
-                    report!(self.lex_quoted_literal(start, char));
-                    self.push(
+                    self.lex_quoted_literal(start, char)?;
+                    self.make(
                         start,
                         self.current_index,
                         TokenKind::StringLiteral,
                         self.slice(start + 1, self.current_index - 1),
                     )
                 }
-                '=' => self.push_advance(start, 1, TokenKind::Equals),
+                '=' => self.make_advance(start, 1, TokenKind::Equals),
                 '-' => match self.peek_char() {
-                    Some('=') => self.push_advance(start, 2, TokenKind::MinusEquals),
-                    _ => self.push_advance(start, 1, TokenKind::Minus),
+                    Some('=') => self.make_advance(start, 2, TokenKind::MinusEquals),
+                    _ => self.make_advance(start, 1, TokenKind::Minus),
                 },
-                '.' => self.push_advance(start, 1, TokenKind::Period),
+                '.' => self.make_advance(start, 1, TokenKind::Period),
                 '+' => match self.peek_char() {
-                    Some('=') => self.push_advance(start, 2, TokenKind::PlusEquals),
-                    _ => self.push_advance(start, 1, TokenKind::Plus),
+                    Some('=') => self.make_advance(start, 2, TokenKind::PlusEquals),
+                    _ => self.make_advance(start, 1, TokenKind::Plus),
                 },
-                ';' => self.push_advance(start, 1, TokenKind::SemiColon),
+                ';' => self.make_advance(start, 1, TokenKind::SemiColon),
                 '/' => match self.peek_char() {
                     Some('/') => {
                         while self.current_char.is_some_and(|c| c != '\n') {
                             self.advance();
                         }
+                        continue;
                     }
                     Some('*') => {
                         let mut depth = 0;
@@ -192,56 +231,43 @@ impl<'contents> Lexer<'contents> {
                             }
                         }
                         if depth > 0 {
-                            self.report(
-                                if depth > 1 {
-                                    ReportKind::UnterminatedMultiLineComment
-                                        .make(self.span_from(start))
-                                        .with_message(format!("Opened {} more time(s)", depth - 1))
-                                } else {
-                                    ReportKind::UnterminatedMultiLineComment
-                                        .make(self.span_from(start))
-                                }
-                                .finish()
-                                .into(),
-                            );
+                            return Err(if depth > 1 {
+                                UnterminatedComment
+                                    .make(self.span(start, start + 2))
+                                    .with_message(format!("Opened {} more time(s)", depth - 1))
+                            } else {
+                                UnterminatedComment.make(self.span(start, start + 2))
+                            }
+                            .into());
                         }
+                        continue;
                     }
-                    Some('=') => self.push_advance(start, 2, TokenKind::Equals),
-                    _ => self.push_advance(start, 1, TokenKind::Slash),
+                    Some('=') => self.make_advance(start, 2, TokenKind::SlashEquals),
+                    _ => self.make_advance(start, 1, TokenKind::Slash),
                 },
                 '*' => match self.peek_char() {
-                    Some('=') => self.push_advance(start, 2, TokenKind::StarEquals),
+                    Some('=') => self.make_advance(start, 2, TokenKind::StarEquals),
                     Some('*') => {
                         self.advance();
                         match self.peek_char() {
-                            Some('=') => self.push_advance(start, 2, TokenKind::StarStarEquals),
-                            _ => self.push_advance(start, 1, TokenKind::StarStar),
+                            Some('=') => self.make_advance(start, 2, TokenKind::StarStarEquals),
+                            _ => self.make_advance(start, 1, TokenKind::StarStar),
                         }
                     }
-                    _ => self.push_advance(start, 1, TokenKind::Star),
+                    _ => self.make_advance(start, 1, TokenKind::Star),
                 },
-                '(' => self.push_advance(start, 1, TokenKind::LeftParen),
-                ')' => self.push_advance(start, 1, TokenKind::RightParen),
-                '[' => self.push_advance(start, 1, TokenKind::LeftBracket),
-                ']' => self.push_advance(start, 1, TokenKind::RightBracket),
-                '{' => self.push_advance(start, 1, TokenKind::LeftBrace),
-                '}' => self.push_advance(start, 1, TokenKind::RightBrace),
+                '(' => self.make_advance(start, 1, TokenKind::LeftParen),
+                ')' => self.make_advance(start, 1, TokenKind::RightParen),
+                '[' => self.make_advance(start, 1, TokenKind::LeftBracket),
+                ']' => self.make_advance(start, 1, TokenKind::RightBracket),
+                '{' => self.make_advance(start, 1, TokenKind::LeftBrace),
+                '}' => self.make_advance(start, 1, TokenKind::RightBrace),
                 _ => {
-                    self.report(
-                        ReportKind::UnexpectedCharacter(char)
-                            .make(self.span_at(start))
-                            .finish()
-                            .into(),
-                    );
                     self.advance();
+                    return Err(UnexpectedCharacter(char).make(self.span_at(start)).into());
                 }
             };
         }
-        self.tokens.push(Token::new(
-            TokenKind::EOF,
-            self.span_from(self.current_index),
-            "",
-        ));
     }
 
     fn lex_quoted_literal(&mut self, start: usize, closer: char) -> Result<()> {
@@ -258,9 +284,7 @@ impl<'contents> Lexer<'contents> {
             }
         }
         if !self.current_char.is_some_and(|c| c == closer) {
-            return Err(ReportKind::UnterminatedStringLiteral
-                .make(self.span_from(start))
-                .into());
+            return Err(UnterminatedString.make(self.span_from(start)).into());
         }
         self.advance();
         Ok(())
@@ -276,12 +300,13 @@ impl<'contents> Lexer<'contents> {
                     self.advance();
                 }
                 (_, '0'..='9' | 'a'..='z') => {
-                    return Err(ReportKind::InvalidIntegerLiteral(base)
-                        .make(self.span_from(start))
+                    return Err(SyntaxError
+                        .make(self.span_at(self.current_index))
+                        .with_message(format!("{char:?} invalid for base {base:?}"))
                         .with_label(
-                            self.span(start, self.current_index - 1)
+                            self.span(start, self.current_index)
                                 .label()
-                                .with_color(Color::Blue),
+                                .with_color(Color::BrightBlue),
                         )
                         .into())
                 }
@@ -290,6 +315,45 @@ impl<'contents> Lexer<'contents> {
             }
         }
         Ok(())
+    }
+}
+
+pub struct LexerIterator<'contents> {
+    exhausted: bool,
+    lexer: Lexer<'contents>,
+}
+
+impl<'contents> Iterator for LexerIterator<'contents> {
+    type Item = Result<Token<'contents>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.exhausted {
+            return None;
+        }
+        let token = self.lexer.lex_token();
+        Some(match token {
+            Ok(t) => {
+                if t.kind == TokenKind::EOF {
+                    self.exhausted = true;
+                }
+                Ok(t)
+            }
+            Err(e) => Err(e),
+        })
+    }
+}
+
+impl<'contents> FusedIterator for LexerIterator<'contents> {}
+
+impl<'contents> IntoIterator for Lexer<'contents> {
+    type Item = Result<Token<'contents>>;
+    type IntoIter = LexerIterator<'contents>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        LexerIterator {
+            exhausted: false,
+            lexer: self,
+        }
     }
 }
 

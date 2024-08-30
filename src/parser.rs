@@ -1,29 +1,63 @@
-use std::fmt::Display;
+use std::fmt::{Display, Formatter};
+
+use name_variant::NamedVariant;
+
+use ParserReport::*;
 
 use crate::ast::{Node, NodeKind};
-use crate::lexer::Base;
-use crate::report::{Report, ReportKind, ReportSender, Result};
+use crate::lexer::{Base, Lexer, LexerIterator};
+use crate::report::{Report, ReportKind, ReportLevel, ReportSender, Result};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
 
+#[derive(NamedVariant)]
+enum ParserReport {
+    SyntaxError(String),
+    UnexpectedToken(TokenKind),
+    UnexpectedEOF,
+}
+
+impl Display for ParserReport {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.variant_name())?;
+        match self {
+            SyntaxError(title) => write!(f, ": {title}")?,
+            UnexpectedToken(kind) => write!(f, ": {kind}")?,
+            _ => (),
+        }
+        Ok(())
+    }
+}
+
+impl From<ParserReport> for ReportLevel {
+    fn from(value: ParserReport) -> Self {
+        match value {
+            SyntaxError(_) | UnexpectedToken(_) | UnexpectedEOF => Self::Error,
+        }
+    }
+}
+
+impl ReportKind for ParserReport {}
+
 pub struct Parser<'contents> {
-    filename: &'static str,
-    tokens: std::iter::Peekable<std::vec::IntoIter<Token<'contents>>>,
+    lexer: std::iter::Peekable<LexerIterator<'contents>>,
     current: Token<'contents>,
     reporter: ReportSender,
 }
 
 impl<'contents> Parser<'contents> {
-    pub fn new(
-        filename: &'static str,
-        tokens: Vec<Token<'contents>>,
-        reporter: ReportSender,
-    ) -> Self {
-        let mut tokens = tokens.into_iter().peekable();
+    pub fn new(filename: &'static str, reporter: ReportSender) -> Self {
+        let mut lexer = Lexer::new(filename).into_iter().peekable();
+        let current = loop {
+            match lexer.next() {
+                Some(Err(report)) => reporter.report(report.finish().into()),
+                Some(Ok(token)) => break token,
+                _ => unreachable!(),
+            }
+        };
         Self {
-            filename,
-            current: tokens.next().unwrap(),
-            tokens,
+            current,
+            lexer,
             reporter,
         }
     }
@@ -33,29 +67,31 @@ impl<'contents> Parser<'contents> {
     }
 
     fn advance(&mut self) {
-        match self.tokens.next() {
-            Some(t) => self.current = t,
-            None => {
-                panic!("Advanced past end of iterator")
+        self.current = loop {
+            match self.lexer.next().expect("Advanced past EOF") {
+                Err(report) => self.report(report.finish().into()),
+                Ok(token) => break token,
             }
         }
     }
 
-    fn skip_until<F: Fn(TokenKind) -> bool>(&mut self, predicate: F) {
+    fn skip_until<F: Fn(TokenKind) -> bool>(&mut self, predicate: F) -> Option<Token> {
         loop {
             match self.current.kind {
-                kind if predicate(kind) => break,
-                TokenKind::EOF => break,
+                kind if predicate(kind) => break Some(self.current),
+                TokenKind::EOF => break None,
                 _ => self.advance(),
             }
         }
     }
 
     fn sync<F: Fn(TokenKind) -> bool>(&mut self, predicate: F) {
-        self.skip_until(|kind| kind.likely_statement_start() || predicate(kind))
+        self.skip_until(
+            |kind| /* Is it a new statement? */matches!(kind, TokenKind::Let) || predicate(kind),
+        );
     }
 
-    fn consume<F: FnOnce(TokenKind) -> bool, T: ToString>(
+    fn consume<F: FnOnce(TokenKind) -> bool, T: Display>(
         &mut self,
         predicate: F,
         message: T,
@@ -68,57 +104,82 @@ impl<'contents> Parser<'contents> {
                 }
                 Ok(token)
             }
-            TokenKind::EOF => Err(ReportKind::UnexpectedEOF
-                .make(token.span)
-                .with_message(message)
-                .into()),
-            kind => Err(ReportKind::UnexpectedToken(kind)
+            TokenKind::EOF => Err(UnexpectedEOF.make(token.span).with_message(message).into()),
+            kind => Err(UnexpectedToken(kind)
                 .make(token.span)
                 .with_message(message)
                 .into()),
         }
-    }
-    pub fn consume_line(&mut self) -> Result<Token> {
-        self.consume_one(TokenKind::SemiColon)
     }
 
     pub fn consume_one(&mut self, expect: TokenKind) -> Result<Token> {
         self.consume(|kind| kind == expect, format!("Expected {expect}"))
     }
 
-    pub fn peek(&mut self) -> Option<&Token> {
-        self.tokens.peek()
+    pub fn consume_line(&mut self) -> Result<Token> {
+        self.consume_one(TokenKind::SemiColon)
+    }
+
+    pub fn skip_line(&mut self) {
+        self.skip_until(|kind| kind != TokenKind::SemiColon);
+    }
+
+    pub fn peek(&mut self) -> Option<&Result<Token>> {
+        self.lexer.peek()
     }
 
     pub fn parse(&mut self) -> Box<Node> {
-        match self.parse_block(self.current.span, TokenKind::EOF) {
-            Ok(program) => program,
-            Err(_) => unreachable!("Global block will always parse."),
+        self.parse_global()
+    }
+
+    fn parse_global(&mut self) -> Box<Node> {
+        let mut stmts = Vec::new();
+        let sync = |s: &mut Parser| s.sync(|kind| kind == TokenKind::SemiColon);
+
+        let start = self.current.span;
+        while self.current.kind != TokenKind::EOF {
+            match self.parse_statement() {
+                Ok(stmt) => match self.consume_line() {
+                    Ok(_) => stmts.push(stmt),
+                    Err(e) => {
+                        self.report(e.finish().into());
+                        sync(self);
+                    }
+                },
+                Err(e) => {
+                    self.report(e.finish().into());
+                    sync(self);
+                }
+            }
+            self.skip_line();
         }
+        let end = self.current.span;
+
+        NodeKind::Block(stmts).make(start.extend(end)).into()
     }
 
     fn parse_block(&mut self, start: Span, closer: TokenKind) -> Result<Box<Node>> {
         let mut stmts = Vec::new();
+        let sync = |s: &mut Parser| s.sync(|kind| kind == closer || kind == TokenKind::SemiColon);
 
-        while self.current.kind != TokenKind::EOF && self.current.kind != closer {
-            let stmt = match self.parse_statement() {
-                Ok(stmt) => stmts.push(stmt),
+        while self.current.kind != closer && self.current.kind != TokenKind::EOF {
+            // errors with errors not handling properly
+            match self.parse_statement() {
+                Ok(stmt) => match self.consume_line() {
+                    Ok(_) => stmts.push(stmt),
+                    Err(e) => {
+                        self.report(e.finish().into());
+                        sync(self);
+                    }
+                },
                 Err(e) => {
                     self.report(e.finish().into());
-                    self.sync(|kind| kind == closer || kind == TokenKind::SemiColon);
-                    match self.current.kind {
-                        TokenKind::SemiColon => {}
-                        _ => continue,
-                    }
+                    sync(self);
                 }
-            };
+            }
+            self.skip_line();
         }
-
-        let end = if closer == TokenKind::EOF {
-            self.current.span
-        } else {
-            self.consume_one(closer)?.span
-        };
+        let end = self.consume_one(closer)?.span;
 
         Ok(NodeKind::Block(stmts).make(start.extend(end)).into())
     }
@@ -134,11 +195,11 @@ impl<'contents> Parser<'contents> {
                 let ident = self.consume_one(TokenKind::Identifier)?.text.to_string();
                 self.consume_one(TokenKind::Equals)?;
                 let expr = self.parse_expression()?;
+                self.consume_line()?;
                 Ok(NodeKind::VariableDeclaration(ident, expr).make(span).into())
             }
             _ => self.parse_expression(),
         };
-        self.consume_line()?;
         stmt
     }
 
@@ -147,7 +208,7 @@ impl<'contents> Parser<'contents> {
     }
 
     fn parse_assignment(&mut self) -> Result<Box<Node>> {
-        let left = self.parse_scope()?;
+        let left = self.parse_atom()?;
         match self.current.kind {
             TokenKind::Equals => {
                 self.advance();
@@ -156,20 +217,6 @@ impl<'contents> Parser<'contents> {
                 Ok(NodeKind::Assignment(left, right).make(span).into())
             }
             _ => Ok(left),
-        }
-    }
-
-    fn parse_scope(&mut self) -> Result<Box<Node>> {
-        match self.current {
-            Token {
-                kind: TokenKind::LeftBrace,
-                span,
-                ..
-            } => {
-                self.advance();
-                self.parse_block(span, TokenKind::RightBrace)
-            }
-            _ => self.parse_atom(),
         }
     }
 
@@ -199,7 +246,11 @@ impl<'contents> Parser<'contents> {
             } => {
                 self.advance();
                 let val = text.parse().map_err(|err| {
-                    Box::new(ReportKind::InvalidFloatLiteral.make(span).with_message(err))
+                    Box::new(
+                        SyntaxError("Invalid Float".to_string())
+                            .make(span)
+                            .with_message(err),
+                    )
                 })?;
                 Ok(NodeKind::FloatLiteral(val).make(span).into())
             }
@@ -223,16 +274,14 @@ impl<'contents> Parser<'contents> {
                 };
                 let val = usize::from_str_radix(text, radix).map_err(|err| {
                     Box::new(
-                        ReportKind::InvalidIntegerLiteral(base)
+                        SyntaxError(format!("Invalid {base:?} Integer"))
                             .make(span)
                             .with_message(err),
                     )
                 })?;
                 Ok(NodeKind::IntegerLiteral(val).make(span).into())
             }
-            token => Err(ReportKind::UnexpectedToken(token.kind)
-                .make(token.span)
-                .into()),
+            token => Err(UnexpectedToken(token.kind).make(token.span).into()),
         }
     }
 }

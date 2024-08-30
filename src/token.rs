@@ -35,15 +35,6 @@ pub enum TokenKind {
     RightBrace,
 }
 
-impl TokenKind {
-    pub fn likely_statement_start(self) -> bool {
-        match self {
-            TokenKind::Let => true,
-            _ => false,
-        }
-    }
-}
-
 impl Display for TokenKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")

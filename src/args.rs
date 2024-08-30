@@ -1,14 +1,30 @@
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::process::exit;
 use std::sync::LazyLock;
 
-use crate::report::{ReportConfig, ReportLevel};
+use crate::report::{ReportConfig, ReportKind, ReportLevel};
 
 pub static ARGS: LazyLock<Args> = LazyLock::new(|| Args::parse(std::env::args().skip(1).collect()));
 
+struct ArgsError(String);
+
+impl Display for ArgsError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ArgParser: {}", self.0)
+    }
+}
+
+impl From<ArgsError> for ReportLevel {
+    fn from(_value: ArgsError) -> Self {
+        Self::Error
+    }
+}
+
+impl ReportKind for ArgsError {}
+
 macro_rules! error {
     ($($ident:tt)*) => {
-        crate::report::ReportKind::ArgParser(format!($($ident)*))
+        ArgsError(format!($($ident)*))
             .make(crate::span::Span::empty())
             .finish()
             .eprint(ReportConfig::default());

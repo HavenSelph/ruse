@@ -1,13 +1,29 @@
 use std::collections::HashMap;
-use std::fmt::{Debug, Display};
+use std::fmt::{Debug, Display, Formatter};
 use std::fs::File;
 use std::io::{BufReader, Read, Result};
 use std::sync::{LazyLock, RwLock};
 
 use ariadne::{Cache, Source};
 
-use crate::report::{ReportKind, UnwrapReport};
+use crate::report::{ReportKind, ReportLevel, UnwrapReport};
 use crate::span::Span;
+
+struct InvalidFile(String);
+
+impl Display for InvalidFile {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "InvalidFile: {}", self.0)
+    }
+}
+
+impl From<InvalidFile> for ReportLevel {
+    fn from(_value: InvalidFile) -> Self {
+        Self::Error
+    }
+}
+
+impl ReportKind for InvalidFile {}
 
 static CACHE: LazyLock<RwLock<HashMap<&'static str, &'static Source<&'static str>>>> =
     LazyLock::new(|| {
@@ -85,7 +101,7 @@ pub fn get_source(filename: &'static str) -> crate::report::ResultFinal<&Source<
     let contents = Scanner::new(filename)
         .map_err(|e| {
             Box::new(
-                ReportKind::InvalidFile(filename)
+                InvalidFile(filename.to_string())
                     .make(Span::empty())
                     .with_note(e)
                     .finish(),
@@ -94,7 +110,7 @@ pub fn get_source(filename: &'static str) -> crate::report::ResultFinal<&Source<
         .read()
         .map_err(|e| {
             Box::new(
-                ReportKind::InvalidFile(filename)
+                InvalidFile(filename.to_string())
                     .make(Span::empty())
                     .with_note(e)
                     .finish(),

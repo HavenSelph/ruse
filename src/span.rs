@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use std::fmt::{Debug, Display, Formatter};
 
 use crate::files::get_source;
@@ -13,18 +15,26 @@ pub struct Location {
 
 impl Location {
     pub fn at(filename: &'static str, index: usize) -> Self {
-        let (line, line_index, column) = get_source(filename).unwrap_report().text()[..index]
-            .char_indices()
-            .fold(
-                (1usize, 0usize, 1usize),
-                |(line, line_index, column), (i, c)| {
-                    if c == '\n' {
-                        (line + 1, i, 1)
-                    } else {
-                        (line, line_index, column + 1)
-                    }
-                },
-            );
+        let file = get_source(filename).unwrap_report();
+        if file.is_empty() {
+            return Self {
+                filename,
+                index,
+                line_index: 0,
+                line: 1,
+                column: 1,
+            };
+        }
+        let (line, line_index, column) = file.text()[..index].char_indices().fold(
+            (1usize, 0usize, 1usize),
+            |(line, line_index, column), (i, c)| {
+                if c == '\n' {
+                    (line + 1, i, 1)
+                } else {
+                    (line, line_index, column + 1)
+                }
+            },
+        );
         Self {
             filename,
             index,
