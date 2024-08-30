@@ -95,7 +95,7 @@ impl<'contents> Parser<'contents> {
         &mut self,
         predicate: F,
         message: T,
-    ) -> Result<Token> {
+    ) -> Result<Token<'contents>> {
         let token = self.current;
         match token.kind {
             kind if predicate(kind) => {
@@ -112,20 +112,17 @@ impl<'contents> Parser<'contents> {
         }
     }
 
-    pub fn consume_one(&mut self, expect: TokenKind) -> Result<Token> {
+    pub fn consume_one(&mut self, expect: TokenKind) -> Result<Token<'contents>> {
         self.consume(|kind| kind == expect, format!("Expected {expect}"))
     }
 
-    pub fn consume_line(&mut self) -> Result<Token> {
-        self.consume_one(TokenKind::SemiColon)
+    pub fn consume_line(&mut self) -> Result<Token<'contents>> {
+        let line = self.consume_one(TokenKind::SemiColon);
+        line
     }
 
     pub fn skip_line(&mut self) {
-        self.skip_until(|kind| kind != TokenKind::SemiColon);
-    }
-
-    pub fn peek(&mut self) -> Option<&Result<Token>> {
-        self.lexer.peek()
+        let _ = self.consume_one(TokenKind::SemiColon);
     }
 
     pub fn parse(&mut self) -> Box<Node> {
@@ -144,14 +141,15 @@ impl<'contents> Parser<'contents> {
                     Err(e) => {
                         self.report(e.finish().into());
                         sync(self);
+                        self.skip_line();
                     }
                 },
                 Err(e) => {
                     self.report(e.finish().into());
                     sync(self);
+                    self.skip_line();
                 }
             }
-            self.skip_line();
         }
         let end = self.current.span;
 
@@ -163,21 +161,21 @@ impl<'contents> Parser<'contents> {
         let sync = |s: &mut Parser| s.sync(|kind| kind == closer || kind == TokenKind::SemiColon);
 
         while self.current.kind != closer && self.current.kind != TokenKind::EOF {
-            // errors with errors not handling properly
             match self.parse_statement() {
                 Ok(stmt) => match self.consume_line() {
                     Ok(_) => stmts.push(stmt),
                     Err(e) => {
                         self.report(e.finish().into());
                         sync(self);
+                        self.skip_line();
                     }
                 },
                 Err(e) => {
                     self.report(e.finish().into());
                     sync(self);
+                    self.skip_line();
                 }
             }
-            self.skip_line();
         }
         let end = self.consume_one(closer)?.span;
 
