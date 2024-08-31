@@ -46,11 +46,17 @@ pub struct Token<'source> {
     pub kind: TokenKind,
     pub span: Span,
     pub text: &'source str,
+    pub newline_before: bool,
 }
 
 impl<'a> Token<'a> {
     pub fn new(kind: TokenKind, span: Span, text: &'a str) -> Self {
-        Token { kind, span, text }
+        Token {
+            kind,
+            span,
+            text,
+            newline_before: false,
+        }
     }
 }
 

@@ -48,6 +48,7 @@ pub struct Lexer<'contents> {
     char_indices: std::iter::Peekable<std::str::CharIndices<'contents>>,
     current_char: Option<char>,
     current_index: usize,
+    seen_newline: bool,
 }
 
 impl<'contents> Lexer<'contents> {
@@ -59,6 +60,7 @@ impl<'contents> Lexer<'contents> {
             char_indices: source.char_indices().peekable(),
             current_char: None,
             current_index: 0,
+            seen_newline: true,
         };
         lexer.advance();
         lexer
@@ -82,7 +84,10 @@ impl<'contents> Lexer<'contents> {
         token_kind: TokenKind,
         text: &'contents str,
     ) -> Result<Token<'contents>> {
-        Ok(Token::new(token_kind, self.span(start, end), text))
+        let mut token = Token::new(token_kind, self.span(start, end), text);
+        token.newline_before = self.seen_newline;
+        self.seen_newline = false;
+        Ok(token)
     }
     fn make_simple(&mut self, start: usize, token_kind: TokenKind) -> Result<Token<'contents>> {
         self.make(
@@ -133,6 +138,13 @@ impl<'contents> Lexer<'contents> {
             };
             let start = self.current_index;
             return match char {
+                '\n' => {
+                    while let Some('\n') = self.current_char {
+                        self.advance();
+                    }
+                    self.seen_newline = true;
+                    continue;
+                }
                 c if c.is_whitespace() => {
                     self.advance();
                     continue;

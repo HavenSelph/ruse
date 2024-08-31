@@ -5,6 +5,15 @@ use name_variant::NamedVariant;
 use crate::span::Span;
 
 #[derive(NamedVariant)]
+pub enum BinaryOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Power,
+}
+
+#[derive(NamedVariant)]
 pub enum NodeKind {
     VariableAccess(String),
     VariableDeclaration(String, Box<Node>),
@@ -13,6 +22,7 @@ pub enum NodeKind {
     FloatLiteral(f64),
     IntegerLiteral(usize),
     BooleanLiteral(bool),
+    BinaryOperation(BinaryOp, Box<Node>, Box<Node>),
     Block(Vec<Box<Node>>),
 }
 
@@ -104,9 +114,22 @@ impl<'a> Display for NodeFormatter<'a> {
         let node = self.node;
         write!(f, "{}", node.kind.variant_name())?;
         match &node.kind {
-            NodeKind::VariableAccess(name) => write!(f, "({name})")?,
-            NodeKind::Assignment(lhs, expr) => write!(f, "({lhs}, {expr})")?,
-            NodeKind::VariableDeclaration(name, expr) => write!(f, "({name}, {expr})")?,
+            NodeKind::BinaryOperation(op, lhs, rhs) => {
+                write!(
+                    f,
+                    "({}) {{\n{},\n{}\n}}",
+                    op.variant_name(),
+                    self.child(lhs),
+                    self.child(rhs)
+                )?;
+            }
+            NodeKind::VariableAccess(name) => write!(f, "({name:?})")?,
+            NodeKind::Assignment(lhs, expr) => {
+                write!(f, " {{{},\n{}\n}}", self.child(lhs), self.child(expr))?
+            }
+            NodeKind::VariableDeclaration(name, expr) => {
+                write!(f, " {{{name:?},\n{}\n}}", self.child(expr))?
+            }
             NodeKind::StringLiteral(val) => write!(f, "({val:?})")?,
             NodeKind::FloatLiteral(val) => write!(f, "({val})")?,
             NodeKind::IntegerLiteral(val) => write!(f, "({val})")?,

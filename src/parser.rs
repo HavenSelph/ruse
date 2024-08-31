@@ -4,7 +4,7 @@ use name_variant::NamedVariant;
 
 use ParserReport::*;
 
-use crate::ast::{Node, NodeKind};
+use crate::ast::{BinaryOp, Node, NodeKind};
 use crate::lexer::{Base, Lexer, LexerIterator};
 use crate::report::{Report, ReportKind, ReportLevel, ReportSender, Result};
 use crate::span::Span;
@@ -116,13 +116,25 @@ impl<'contents> Parser<'contents> {
         self.consume(|kind| kind == expect, format!("Expected {expect}"))
     }
 
-    pub fn consume_line(&mut self) -> Result<Token<'contents>> {
-        let line = self.consume_one(TokenKind::SemiColon);
-        line
-    }
-
-    pub fn skip_line(&mut self) {
-        let _ = self.consume_one(TokenKind::SemiColon);
+    pub fn consume_line(&mut self) -> Result<()> {
+        match self.current {
+            Token {
+                kind: TokenKind::SemiColon,
+                ..
+            } => self.advance(),
+            Token {
+                kind: TokenKind::EOF,
+                ..
+            } => (),
+            token if token.newline_before => (),
+            token => {
+                return Err(UnexpectedToken(token.kind)
+                    .make(token.span)
+                    .with_message("Expected end of statement")
+                    .into())
+            }
+        }
+        Ok(())
     }
 
     pub fn parse(&mut self) -> Box<Node> {
@@ -141,13 +153,13 @@ impl<'contents> Parser<'contents> {
                     Err(e) => {
                         self.report(e.finish().into());
                         sync(self);
-                        self.skip_line();
+                        self.skip_until(|kind| kind != TokenKind::SemiColon);
                     }
                 },
                 Err(e) => {
                     self.report(e.finish().into());
                     sync(self);
-                    self.skip_line();
+                    self.skip_until(|kind| kind != TokenKind::SemiColon);
                 }
             }
         }
@@ -167,13 +179,13 @@ impl<'contents> Parser<'contents> {
                     Err(e) => {
                         self.report(e.finish().into());
                         sync(self);
-                        self.skip_line();
+                        self.skip_until(|kind| kind != TokenKind::SemiColon);
                     }
                 },
                 Err(e) => {
                     self.report(e.finish().into());
                     sync(self);
-                    self.skip_line();
+                    self.skip_until(|kind| kind != TokenKind::SemiColon);
                 }
             }
         }
@@ -205,8 +217,10 @@ impl<'contents> Parser<'contents> {
         self.parse_assignment()
     }
 
+    // fn parse_lambda(&mut self) -> Result<Box<Node>> {}
+
     fn parse_assignment(&mut self) -> Result<Box<Node>> {
-        let left = self.parse_atom()?;
+        let left = self.parse_if()?;
         match self.current.kind {
             TokenKind::Equals => {
                 self.advance();
@@ -218,30 +232,118 @@ impl<'contents> Parser<'contents> {
         }
     }
 
+    fn parse_if(&mut self) -> Result<Box<Node>> {
+        self.parse_logical_or()
+    }
+
+    fn parse_logical_or(&mut self) -> Result<Box<Node>> {
+        self.parse_logical_and()
+    }
+
+    fn parse_logical_and(&mut self) -> Result<Box<Node>> {
+        self.parse_logical_not()
+    }
+
+    fn parse_logical_not(&mut self) -> Result<Box<Node>> {
+        self.parse_comparison()
+    }
+
+    fn parse_comparison(&mut self) -> Result<Box<Node>> {
+        self.parse_additive()
+    }
+
+    fn parse_additive(&mut self) -> Result<Box<Node>> {
+        let lhs = self.parse_multiplicative()?;
+        match self.current.kind {
+            TokenKind::Plus | TokenKind::Minus => {
+                let op = match self.current.kind {
+                    TokenKind::Plus => BinaryOp::Add,
+                    TokenKind::Minus => BinaryOp::Subtract,
+                    _ => unreachable!(),
+                };
+                self.advance();
+                let rhs = self.parse_additive()?;
+                let span = rhs.span;
+                Ok(NodeKind::BinaryOperation(op, lhs, rhs).make(span).into())
+            }
+            _ => Ok(lhs),
+        }
+    }
+    fn parse_multiplicative(&mut self) -> Result<Box<Node>> {
+        let lhs = self.parse_sign()?;
+        match self.current.kind {
+            TokenKind::Star | TokenKind::Slash => {
+                let op = match self.current.kind {
+                    TokenKind::Star => BinaryOp::Multiply,
+                    TokenKind::Slash => BinaryOp::Divide,
+                    _ => unreachable!(),
+                };
+                self.advance();
+                let rhs = self.parse_multiplicative()?;
+                let span = rhs.span;
+                Ok(NodeKind::BinaryOperation(op, lhs, rhs).make(span).into())
+            }
+            _ => Ok(lhs),
+        }
+    }
+
+    fn parse_sign(&mut self) -> Result<Box<Node>> {
+        self.parse_exponential()
+    }
+
+    fn parse_exponential(&mut self) -> Result<Box<Node>> {
+        let lhs = self.parse_prefix()?;
+        match self.current.kind {
+            TokenKind::StarStar => {
+                self.advance();
+                let rhs = self.parse_exponential()?;
+                let span = rhs.span;
+                Ok(NodeKind::BinaryOperation(BinaryOp::Power, lhs, rhs)
+                    .make(span)
+                    .into())
+            }
+            _ => Ok(lhs),
+        }
+    }
+
+    fn parse_prefix(&mut self) -> Result<Box<Node>> {
+        self.parse_postfix()
+    }
+
+    fn parse_postfix(&mut self) -> Result<Box<Node>> {
+        self.parse_atom()
+    }
+
     fn parse_atom(&mut self) -> Result<Box<Node>> {
-        match self.current {
-            Token {
-                kind: TokenKind::StringLiteral,
-                text,
-                span,
-            } => {
+        let Token {
+            kind, text, span, ..
+        } = self.current;
+        match kind {
+            TokenKind::LeftParen => {
+                self.advance();
+                let mut exp = self.parse_expression()?;
+                let end = self.consume_one(TokenKind::RightParen)?.span;
+                exp.span = span.extend(end);
+                Ok(exp)
+            }
+            TokenKind::LeftBrace => {
+                self.advance();
+                self.parse_block(span, TokenKind::RightBrace)
+            }
+            TokenKind::Identifier => {
+                self.advance();
+                Ok(NodeKind::VariableAccess(text.to_string()).make(span).into())
+            }
+            TokenKind::StringLiteral => {
                 self.advance();
                 // todo: make this actually parse the string properly
                 Ok(NodeKind::StringLiteral(text.to_string()).make(span).into())
             }
-            Token {
-                kind: TokenKind::BooleanLiteral,
-                text,
-                span,
-            } => {
+            TokenKind::BooleanLiteral => {
                 self.advance();
                 Ok(NodeKind::BooleanLiteral(text.eq("true")).make(span).into())
             }
-            Token {
-                kind: TokenKind::FloatLiteral,
-                text,
-                span,
-            } => {
+            TokenKind::FloatLiteral => {
                 self.advance();
                 let val = text.parse().map_err(|err| {
                     Box::new(
@@ -252,15 +354,10 @@ impl<'contents> Parser<'contents> {
                 })?;
                 Ok(NodeKind::FloatLiteral(val).make(span).into())
             }
-            Token {
-                kind:
-                    TokenKind::IntegerLiteralBin
-                    | TokenKind::IntegerLiteralDec
-                    | TokenKind::IntegerLiteralHex
-                    | TokenKind::IntegerLiteralOct,
-                text,
-                span,
-            } => {
+            TokenKind::IntegerLiteralBin
+            | TokenKind::IntegerLiteralDec
+            | TokenKind::IntegerLiteralHex
+            | TokenKind::IntegerLiteralOct => {
                 let Token { kind, .. } = self.current;
                 self.advance();
                 let (base, radix) = match kind {
@@ -279,7 +376,7 @@ impl<'contents> Parser<'contents> {
                 })?;
                 Ok(NodeKind::IntegerLiteral(val).make(span).into())
             }
-            token => Err(UnexpectedToken(token.kind).make(token.span).into()),
+            _ => Err(UnexpectedToken(kind).make(span).into()),
         }
     }
 }
