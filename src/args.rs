@@ -54,8 +54,8 @@ impl<T: Copy + Clone> Arg<T> {
         self.value = value;
     }
 
-    pub fn to_value(&self) -> T {
-        self.value.clone()
+    pub fn to_value(self) -> T {
+        self.value
     }
 }
 
@@ -73,7 +73,7 @@ impl<T: Debug + Copy + Clone> Debug for Arg<T> {
 
 #[derive(Debug, Copy, Clone)]
 pub struct Args {
-    pub input: &'static str,
+    pub input: Arg<&'static str>,
     pub output: Arg<&'static str>,
     pub debug: Arg<bool>,
     pub report_level: Arg<ReportLevel>,
@@ -81,22 +81,38 @@ pub struct Args {
     pub context: Arg<bool>,
 }
 
+macro_rules! make_getter {
+    ($($field:ident: $field_type:ty = ($field_default:expr)),+$(,)?) => {
+        impl Args {
+            pub fn default() -> Self {
+                Self {
+                    $(
+                    $field:Arg::new($field_default),
+                    )+
+                }
+            }
+            $(
+            pub fn $field(&self) -> $field_type {
+                self.$field.to_value()
+            })+
+        }
+    };
+}
+
+make_getter! {
+    input: &'static str=(""),
+    output: &'static str=(""),
+    debug: bool=(false),
+    report_level: ReportLevel=(ReportLevel::Warn),
+    compact: bool=(false),
+    context: bool=(true)
+}
+
 impl Args {
     pub fn config(&self) -> ReportConfig {
         ReportConfig {
             compact: self.compact.to_value(),
             code_context: self.context.to_value(),
-        }
-    }
-
-    pub fn default() -> Self {
-        Self {
-            input: "",
-            output: Arg::new("./out"),
-            debug: Arg::new(false),
-            report_level: Arg::new(ReportLevel::Warn),
-            compact: Arg::new(false),
-            context: Arg::new(true),
         }
     }
 
@@ -179,14 +195,14 @@ impl Args {
             if arg.starts_with("-") {
                 out.handle_arg(&arg, &mut args)
             } else {
-                out.input = arg.leak();
+                out.input.try_mut("Filename", arg.leak());
                 break;
             }
         }
         if let Some(arg) = args.next() {
             error!("unexpected argument '{}'", arg);
         }
-        if out.input.is_empty() {
+        if !out.input.set {
             error!("specify an input file");
         }
 

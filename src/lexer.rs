@@ -22,6 +22,7 @@ enum LexerReport {
 impl Display for LexerReport {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.variant_name())?;
+        #[allow(clippy::single_match)]
         match self {
             UnexpectedCharacter(c) => write!(f, ": {c}")?,
             _ => (),
@@ -127,6 +128,7 @@ impl<'contents> Lexer<'contents> {
         &self.source[start..end]
     }
 
+    #[allow(clippy::cognitive_complexity)]
     pub fn lex_token(&mut self) -> Result<Token<'contents>> {
         loop {
             let Some(char) = self.current_char else {
@@ -150,14 +152,20 @@ impl<'contents> Lexer<'contents> {
                     continue;
                 }
                 'a'..='z' | 'A'..='Z' | '_' => {
-                    loop {
-                        match self.current_char {
-                            Some('a'..='z' | 'A'..='Z' | '_') => self.advance(),
-                            _ => break,
-                        }
+                    while let Some('a'..='z' | 'A'..='Z' | '_') = self.current_char {
+                        self.advance();
                     }
                     let kind = match self.slice(start, self.current_index) {
                         "let" => TokenKind::Let,
+                        "if" => TokenKind::If,
+                        "else" => TokenKind::Else,
+                        "for" => TokenKind::For,
+                        "return" => TokenKind::Return,
+                        "fn" => TokenKind::Fn,
+                        "in" => TokenKind::In,
+                        "continue" => TokenKind::Continue,
+                        "break" => TokenKind::Break,
+                        "None" => TokenKind::None,
                         "True" | "False" => TokenKind::BooleanLiteral,
                         _ => TokenKind::Identifier,
                     };
@@ -178,16 +186,9 @@ impl<'contents> Lexer<'contents> {
                 '0'..='9' => {
                     self.lex_integer(start, Base::Decimal)?;
                     if let Some('.') = self.current_char {
-                        self.advance();
-                        self.lex_integer(start, Base::Decimal)?;
-                        if let Some('.') = self.current_char {
-                            return Err(SyntaxError
-                                .make(self.span_at(self.current_index))
-                                .with_message("Second decimal place in float")
-                                .with_label(
-                                    self.span_from(start).label().with_color(Color::BrightBlue),
-                                )
-                                .into());
+                        if !self.peek_char().is_some_and(|c| c == &'.') {
+                            self.advance();
+                            self.lex_integer(start, Base::Decimal)?;
                         }
                     }
                     let kind = if self.slice(start, self.current_index).contains('.') {
@@ -206,12 +207,19 @@ impl<'contents> Lexer<'contents> {
                         self.slice(start + 1, self.current_index - 1),
                     )
                 }
-                '=' => self.make_advance(start, 1, TokenKind::Equals),
+                '=' => match self.peek_char() {
+                    Some('=') => self.make_advance(start, 2, TokenKind::EqualsEquals),
+                    _ => self.make_advance(start, 1, TokenKind::Equals),
+                },
                 '-' => match self.peek_char() {
                     Some('=') => self.make_advance(start, 2, TokenKind::MinusEquals),
                     _ => self.make_advance(start, 1, TokenKind::Minus),
                 },
-                '.' => self.make_advance(start, 1, TokenKind::Period),
+                ',' => self.make_advance(start, 1, TokenKind::Comma),
+                '.' => match self.peek_char() {
+                    Some('.') => self.make_advance(start, 1, TokenKind::PeriodPeriod),
+                    _ => self.make_advance(start, 1, TokenKind::Period),
+                },
                 '+' => match self.peek_char() {
                     Some('=') => self.make_advance(start, 2, TokenKind::PlusEquals),
                     _ => self.make_advance(start, 1, TokenKind::Plus),
@@ -267,6 +275,33 @@ impl<'contents> Lexer<'contents> {
                         }
                     }
                     _ => self.make_advance(start, 1, TokenKind::Star),
+                },
+                '@' => self.make_advance(start, 1, TokenKind::At),
+                '?' => self.make_advance(start, 1, TokenKind::QuestionMark),
+                ':' => self.make_advance(start, 1, TokenKind::Colon),
+                '&' => match self.peek_char() {
+                    Some('&') => self.make_advance(start, 2, TokenKind::AmpersandAmpersand),
+                    _ => self.make_advance(start, 1, TokenKind::Ampersand),
+                },
+                '|' => match self.peek_char() {
+                    Some('|') => self.make_advance(start, 2, TokenKind::PipePipe),
+                    _ => self.make_advance(start, 1, TokenKind::Pipe),
+                },
+                '!' => match self.peek_char() {
+                    Some('=') => self.make_advance(start, 2, TokenKind::BangEquals),
+                    _ => self.make_advance(start, 1, TokenKind::Bang),
+                },
+                '<' => match self.peek_char() {
+                    Some('=') => self.make_advance(start, 2, TokenKind::LessThanEquals),
+                    _ => self.make_advance(start, 1, TokenKind::LessThan),
+                },
+                '>' => match self.peek_char() {
+                    Some('=') => self.make_advance(start, 2, TokenKind::GreaterThanEquals),
+                    _ => self.make_advance(start, 1, TokenKind::GreaterThan),
+                },
+                '%' => match self.peek_char() {
+                    Some('=') => self.make_advance(start, 2, TokenKind::PercentEquals),
+                    _ => self.make_advance(start, 1, TokenKind::Percent),
                 },
                 '(' => self.make_advance(start, 1, TokenKind::LeftParen),
                 ')' => self.make_advance(start, 1, TokenKind::RightParen),

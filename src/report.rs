@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use std::fmt::Display;
+use std::fmt::{Display, Formatter};
 use std::io::Write;
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -71,7 +71,7 @@ pub trait SpanToLabel<T: ariadne::Span>: ariadne::Span {
 
 impl SpanToLabel<Span> for Span {
     fn label(&self) -> Label {
-        Label::new(self.clone())
+        Label::new(*self)
     }
 }
 
@@ -161,6 +161,12 @@ pub struct ReportBuilder {
     labels: Vec<Label>,
 }
 
+impl std::fmt::Debug for ReportBuilder {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Report[{}]", self.span)
+    }
+}
+
 impl ReportBuilder {
     pub fn set_help<T: Display>(&mut self, help: T) -> &mut Self {
         self.help = Some(help.to_string());
@@ -224,19 +230,10 @@ impl ReportBuilder {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct ReportConfig {
     pub code_context: bool,
     pub compact: bool,
-}
-
-impl Default for ReportConfig {
-    fn default() -> Self {
-        Self {
-            code_context: false,
-            compact: false,
-        }
-    }
 }
 
 pub struct Report {

@@ -75,7 +75,7 @@ impl Span {
         Self::new("", 0, 0)
     }
 
-    pub fn extend(&self, other: Self) -> Self {
+    pub fn extend(&self, other: &Self) -> Self {
         Self {
             filename: self.filename,
             start: self.start,
