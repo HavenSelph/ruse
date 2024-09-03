@@ -1,14 +1,11 @@
-use std::fmt::{Display, Formatter};
-
-use name_variant::NamedVariant;
-
-use ParserReport::*;
-
 use crate::ast::{BinaryOp, Node, NodeKind, UnaryOp};
 use crate::lexer::{Base, Lexer, LexerIterator};
 use crate::report::{Report, ReportKind, ReportLevel, ReportSender, Result};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
+use name_variant::NamedVariant;
+use std::fmt::{Display, Formatter};
+use ParserReport::*;
 
 type SliceValue = (Option<Box<Node>>, bool, Option<Box<Node>>);
 
@@ -48,8 +45,8 @@ pub struct Parser<'contents> {
 }
 
 impl<'contents> Parser<'contents> {
-    pub fn new(filename: &'static str, reporter: ReportSender) -> Self {
-        let mut lexer = Lexer::new(filename).into_iter().peekable();
+    pub fn new(filename: &'static str, reporter: ReportSender) -> Result<Self> {
+        let mut lexer = Lexer::new(filename)?.into_iter().peekable();
         let current = loop {
             match lexer.next() {
                 Some(Err(report)) => reporter.report(report.finish().into()),
@@ -57,11 +54,11 @@ impl<'contents> Parser<'contents> {
                 _ => unreachable!(),
             }
         };
-        Self {
+        Ok(Self {
             current,
             lexer,
             reporter,
-        }
+        })
     }
 
     fn report(&self, report: Box<Report>) {
@@ -491,6 +488,10 @@ impl<'contents> Parser<'contents> {
                     }
                     .make(span)
                     .into()
+                }
+                TokenKind::LeftParen => {
+                    self.advance();
+                    todo!("Woah there dummy you didn't do this lol nerd")
                 }
                 _ => break Ok(lhs),
             }

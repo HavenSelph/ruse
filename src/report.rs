@@ -1,15 +1,14 @@
 #![allow(unused)]
-
-use std::fmt::{Display, Formatter};
-use std::io::Write;
-use std::sync::mpsc::{Receiver, Sender};
-
-use ariadne::{Color, Config};
-use owo_colors::OwoColorize;
-
 use crate::args::ARGS;
+use crate::dprint;
 use crate::files::ScannerCache;
 use crate::span::Span;
+use ariadne::{Color, Config};
+use owo_colors::OwoColorize;
+use std::fmt::{Display, Formatter};
+use std::io::Write;
+use std::process::exit;
+use std::sync::mpsc::{Receiver, Sender};
 
 pub type Result<T> = std::result::Result<T, Box<ReportBuilder>>;
 pub type ResultFinal<T> = std::result::Result<T, Box<Report>>;
@@ -80,6 +79,7 @@ where
     Self: Sized,
 {
     fn unwrap_report(self) -> T;
+    fn unwrap_report_or(self, default: T) -> T;
 }
 
 impl<T> UnwrapReport<T> for Result<T> {
@@ -87,8 +87,18 @@ impl<T> UnwrapReport<T> for Result<T> {
         match self {
             Ok(val) => val,
             Err(err) => {
-                err.finish().print(ARGS.config());
-                std::process::exit(1);
+                ReportChannel::check_report(err.finish());
+                exit(1);
+            }
+        }
+    }
+
+    fn unwrap_report_or(self, default: T) -> T {
+        match self {
+            Ok(val) => val,
+            Err(err) => {
+                ReportChannel::check_report(err.finish());
+                default
             }
         }
     }
@@ -99,8 +109,18 @@ impl<T> UnwrapReport<T> for ResultFinal<T> {
         match self {
             Ok(val) => val,
             Err(err) => {
-                err.print(ARGS.config());
-                std::process::exit(1);
+                ReportChannel::check_report(*err);
+                exit(1);
+            }
+        }
+    }
+
+    fn unwrap_report_or(self, default: T) -> T {
+        match self {
+            Ok(val) => val,
+            Err(err) => {
+                ReportChannel::check_report(*err);
+                default
             }
         }
     }
@@ -320,6 +340,14 @@ impl ReportChannel {
         }
     }
 
+    pub fn check_report(report: Report) {
+        let error = report.level == ReportLevel::Error;
+        if ARGS.report_level.to_value() >= report.level {
+            dprint!("Report[{}]", report.span);
+            report.print(ARGS.config());
+        }
+    }
+
     pub fn check_reports(&self) {
         let mut errors = 0usize;
         let mut buffer: Vec<u8> = Vec::new();
@@ -343,7 +371,7 @@ impl ReportChannel {
                     format_args!("Failed with {errors} errors emitted.").red()
                 );
             }
-            std::process::exit(1);
+            exit(1);
         }
     }
 }

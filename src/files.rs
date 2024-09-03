@@ -1,13 +1,11 @@
-use std::collections::HashMap;
+use crate::report::{ReportKind, ReportLevel, UnwrapReport};
+use crate::span::Span;
+use ariadne::{Cache, Source};
+use dashmap::{DashMap, Entry};
 use std::fmt::{Debug, Display, Formatter};
 use std::fs::File;
 use std::io::{BufReader, Read, Result};
-use std::sync::{LazyLock, RwLock};
-
-use ariadne::{Cache, Source};
-
-use crate::report::{ReportKind, ReportLevel, UnwrapReport};
-use crate::span::Span;
+use std::sync::LazyLock;
 
 struct InvalidFile(String);
 
@@ -25,16 +23,15 @@ impl From<InvalidFile> for ReportLevel {
 
 impl ReportKind for InvalidFile {}
 
-static CACHE: LazyLock<RwLock<HashMap<&'static str, &'static Source<&'static str>>>> =
-    LazyLock::new(|| {
-        let mut hm = HashMap::with_capacity(2);
-        hm.insert("", &*Box::leak(Source::from("").into()));
-        RwLock::new(hm)
-    });
+static CACHE: LazyLock<DashMap<&'static str, &'static Source>> = LazyLock::new(|| {
+    let hm = DashMap::with_capacity(2);
+    hm.insert("", &*Box::leak(Source::from("".to_string()).into()));
+    hm
+});
 
 pub struct ScannerCache {}
 impl Cache<&'static str> for ScannerCache {
-    type Storage = &'static str;
+    type Storage = String;
 
     fn fetch(
         &mut self,
@@ -51,7 +48,7 @@ impl Cache<&'static str> for ScannerCache {
 pub struct Scanner {
     filename: &'static str,
     index: usize,
-    contents: &'static mut String,
+    contents: String,
     reader: BufReader<File>,
 }
 
@@ -63,7 +60,7 @@ impl Scanner {
         Ok(Self {
             filename,
             index: 0,
-            contents: Box::leak(Box::new(String::with_capacity(file_size))),
+            contents: String::with_capacity(file_size),
             reader: BufReader::new(file),
         })
     }
@@ -90,37 +87,26 @@ impl Scanner {
     }
 }
 
-pub fn get_source(filename: &'static str) -> crate::report::ResultFinal<&Source<&'static str>> {
-    {
-        let binding = CACHE.read().unwrap();
-        if let Some(contents) = binding.get(filename) {
-            return Ok(contents);
+pub fn get_source(filename: &'static str) -> crate::report::Result<&Source> {
+    match CACHE.entry(filename) {
+        Entry::Occupied(entry) => Ok(entry.get()),
+        Entry::Vacant(entry) => {
+            let contents = Scanner::new(filename)
+                .map_err(|e| {
+                    InvalidFile(filename.to_string())
+                        .make(Span::empty())
+                        .with_note(e)
+                })?
+                .read()
+                .map_err(|e| {
+                    InvalidFile(filename.to_string())
+                        .make(Span::empty())
+                        .with_note(e)
+                })?
+                .contents;
+            Ok(entry
+                .insert(Box::leak(Source::from(contents).into()))
+                .value_mut())
         }
     }
-
-    let contents = Scanner::new(filename)
-        .map_err(|e| {
-            Box::new(
-                InvalidFile(filename.to_string())
-                    .make(Span::empty())
-                    .with_note(e)
-                    .finish(),
-            )
-        })?
-        .read()
-        .map_err(|e| {
-            Box::new(
-                InvalidFile(filename.to_string())
-                    .make(Span::empty())
-                    .with_note(e)
-                    .finish(),
-            )
-        })?
-        .contents
-        .as_str();
-    let mut binding = CACHE.write().unwrap();
-    let inserted = binding
-        .entry(filename)
-        .or_insert(Box::leak(Box::new(Source::from(contents))));
-    Ok(inserted)
 }

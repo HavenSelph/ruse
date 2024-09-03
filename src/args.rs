@@ -1,8 +1,7 @@
+use crate::report::{ReportConfig, ReportKind, ReportLevel};
 use std::fmt::{Debug, Display, Formatter};
 use std::process::exit;
 use std::sync::LazyLock;
-
-use crate::report::{ReportConfig, ReportKind, ReportLevel};
 
 pub static ARGS: LazyLock<Args> = LazyLock::new(|| Args::parse(std::env::args().skip(1).collect()));
 

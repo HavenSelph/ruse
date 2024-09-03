@@ -1,8 +1,6 @@
-use std::fmt::{Debug, Display, Formatter};
-
-use name_variant::NamedVariant;
-
 use crate::span::Span;
+use name_variant::NamedVariant;
+use std::fmt::{Debug, Display, Formatter};
 
 #[derive(NamedVariant)]
 pub enum BinaryOp {
@@ -31,6 +29,9 @@ pub enum UnaryOp {
 #[derive(NamedVariant)]
 pub enum NodeKind {
     NoneLiteral,
+    // Function {
+    //     positional: Vec<Node>,
+    // },
     Subscript {
         lhs: Box<Node>,
         start: Option<Box<Node>>,

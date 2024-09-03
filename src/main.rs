@@ -1,10 +1,9 @@
 #![allow(clippy::upper_case_acronyms)]
 #![warn(clippy::complexity)]
-
 use crate::args::ARGS;
 use crate::interpreter::{Interpreter, Scope};
 use crate::parser::Parser;
-use crate::report::ReportChannel;
+use crate::report::{ReportChannel, UnwrapReport};
 
 mod args;
 mod ast;
@@ -21,7 +20,7 @@ fn main() {
     let reporter = ReportChannel::new();
 
     let ast = {
-        let mut parser = Parser::new(ARGS.input(), reporter.get_sender());
+        let mut parser = Parser::new(ARGS.input(), reporter.get_sender()).unwrap_report();
         parser.parse()
     };
 
@@ -34,6 +33,4 @@ fn main() {
         Ok(val) => println!("{}", val),
         Err(err) => reporter.get_sender().report(err.finish().into()),
     }
-
-    reporter.check_reports();
 }

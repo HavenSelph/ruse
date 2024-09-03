@@ -1,14 +1,12 @@
-use std::cmp::Ordering;
-use std::fmt::Formatter;
-use std::ops::Neg;
-
-use name_variant::NamedVariant;
-
-use crate::interpreter::Ref;
 use crate::interpreter::value::ValueReport::*;
+use crate::interpreter::Ref;
 use crate::ref_it;
 use crate::report::{ReportKind, ReportLevel, Result};
 use crate::span::Span;
+use name_variant::NamedVariant;
+use std::cmp::Ordering;
+use std::fmt::Formatter;
+use std::ops::Neg;
 
 #[derive(NamedVariant)]
 enum ValueReport {

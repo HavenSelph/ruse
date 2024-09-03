@@ -1,9 +1,7 @@
 #![allow(unused)]
-
-use std::fmt::{Debug, Display, Formatter};
-
 use crate::files::get_source;
 use crate::report::UnwrapReport;
+use std::fmt::{Debug, Display, Formatter};
 
 pub struct Location {
     filename: &'static str,

@@ -1,15 +1,12 @@
-use std::fmt::{Display, Formatter};
-use std::iter::FusedIterator;
-
-use ariadne::Color;
-use name_variant::NamedVariant;
-
-use LexerReport::*;
-
 use crate::files::get_source;
-use crate::report::{ReportKind, ReportLevel, Result, SpanToLabel, UnwrapReport};
+use crate::report::{ReportKind, ReportLevel, Result, SpanToLabel};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
+use ariadne::Color;
+use name_variant::NamedVariant;
+use std::fmt::{Display, Formatter};
+use std::iter::FusedIterator;
+use LexerReport::*;
 
 #[derive(NamedVariant)]
 enum LexerReport {
@@ -53,8 +50,8 @@ pub struct Lexer<'contents> {
 }
 
 impl<'contents> Lexer<'contents> {
-    pub fn new(filename: &'static str) -> Self {
-        let source = get_source(filename).unwrap_report().text();
+    pub fn new(filename: &'static str) -> Result<Self> {
+        let source = get_source(filename)?.text();
         let mut lexer = Self {
             filename,
             source,
@@ -64,7 +61,7 @@ impl<'contents> Lexer<'contents> {
             seen_newline: true,
         };
         lexer.advance();
-        lexer
+        Ok(lexer)
     }
 
     fn advance(&mut self) {
@@ -239,9 +236,11 @@ impl<'contents> Lexer<'contents> {
                                 '/' if self.peek_char().is_some_and(|c| *c == '*') => {
                                     depth += 1;
                                     self.advance();
+                                    self.advance();
                                 }
                                 '*' if self.peek_char().is_some_and(|c| *c == '/') => {
                                     depth -= 1;
+                                    self.advance();
                                     self.advance();
                                 }
                                 _ => self.advance(),

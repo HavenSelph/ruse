@@ -1,16 +1,13 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
-use std::rc::Rc;
-
-use name_variant::NamedVariant;
-
-use InterpreterReport::*;
-
 use crate::ast::{BinaryOp, Node, NodeKind, UnaryOp};
 use crate::interpreter::value::Value;
 use crate::report::{ReportKind, ReportLevel, Result};
 use crate::span::Span;
+use name_variant::NamedVariant;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
+use std::rc::Rc;
+use InterpreterReport::*;
 
 mod value;
 
