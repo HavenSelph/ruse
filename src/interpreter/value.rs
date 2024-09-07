@@ -35,9 +35,10 @@ impl From<ValueReport> for ReportLevel {
 
 impl ReportKind for ValueReport {}
 
+#[allow(dead_code)]
 pub enum FunctionRun {
     Program(Box<crate::ast::Node>),
-    BuiltIn(&'static dyn Fn(Ref<Scope>) -> Result<Value>),
+    BuiltIn(&'static dyn Fn(Ref<Scope>, Span) -> Result<Value>),
 }
 
 pub enum FunctionArg {
@@ -174,65 +175,48 @@ impl Value {
                 let mut arg_map: IndexMap<&String, &FunctionArg> =
                     IndexMap::from_iter(function.args.iter().rev());
 
-                let mut keyword_variadic_values = Vec::new();
-                let keyword_variadic = if let Some(entry) = arg_map.last_entry() {
-                    match entry.get() {
-                        FunctionArg::KeywordVariadic(..) => Some(entry.shift_remove_entry().0),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-
-                while let Some(CallArg::Positional(..)) = call_args.peek() {
-                    let CallArg::Positional(span, value) = call_args.next().unwrap() else {
-                        unreachable!();
-                    };
-                    let Some((name, kind)) = arg_map.pop() else {
-                        return Err(UnexpectedArgument.make(*span).into());
-                    };
-                    match kind {
-                        FunctionArg::Positional(..) => {
-                            scope.borrow_mut().declare(name, value.clone(), *span)?;
+                while let Some(CallArg::Positional(span, val)) = call_args.peek() {
+                    call_args.next();
+                    match arg_map.pop() {
+                        Some((name, FunctionArg::Positional(_))) => {
+                            scope.borrow_mut().declare(name, val.clone(), *span)?;
                         }
-                        FunctionArg::PositionalVariadic(..) => {
-                            let mut values = vec![value.clone()];
-                            while let Some(CallArg::Positional(_, value)) = call_args.next() {
-                                values.push(value.clone());
+                        Some((name, FunctionArg::PositionalVariadic(_))) => {
+                            let mut values = vec![val.clone()];
+                            while let Some(CallArg::Positional(_, val)) = call_args.peek() {
+                                call_args.next();
+                                values.push(val.clone());
                             }
                             scope.borrow_mut().declare(
                                 name,
                                 Value::Tuple(ref_it!(values)),
                                 *span,
-                            )?
+                            )?;
                         }
-                        FunctionArg::Keyword(..) => {
-                            scope.borrow_mut().declare(name, value.clone(), *span)?;
+                        Some((name, FunctionArg::Keyword(..))) => {
+                            scope.borrow_mut().declare(name, val.clone(), *span)?;
                         }
                         _ => return Err(UnexpectedArgument.make(*span).into()),
                     }
                 }
 
-                while let Some(CallArg::Keyword(..)) = call_args.peek() {
-                    let CallArg::Keyword(span, name, value) = call_args.next().unwrap() else {
-                        unreachable!();
-                    };
-                    if let Some((_, kind)) = arg_map.shift_remove_entry(name) {
-                        match kind {
-                            FunctionArg::Keyword(..) => {
-                                scope.borrow_mut().declare(name, value.clone(), *span)?;
-                            }
-                            _ => return Err(UnexpectedArgument.make(*span).into()),
+                while let Some(CallArg::Keyword(span, name, val)) = call_args.peek() {
+                    call_args.next();
+                    if let Some(CallArg::Positional(span, ..)) = call_args.peek() {
+                        return Err(UnexpectedArgument
+                            .make(*span)
+                            .with_message("Positional arguments must not follow keyword arguments")
+                            .into());
+                    }
+                    match arg_map.shift_remove_entry(name) {
+                        Some((_, FunctionArg::Positional(_))) => {
+                            scope.borrow_mut().declare(name, val.clone(), *span)?;
                         }
-                    } else if keyword_variadic.is_some() {
-                        keyword_variadic_values.push((name, value.clone()));
-                    } else {
-                        return Err(UnexpectedArgument.make(*span).into());
-                    };
-                }
-
-                if let Some(_keyword_variadic) = keyword_variadic {
-                    todo!("This does not work yet! need to add hashing first")
+                        Some((_, FunctionArg::Keyword(..))) => {
+                            scope.borrow_mut().declare(name, val.clone(), *span)?;
+                        }
+                        _ => return Err(UnexpectedArgument.make(*span).into()),
+                    }
                 }
 
                 while let Some((name, kind)) = arg_map.pop() {
@@ -240,24 +224,18 @@ impl Value {
                         FunctionArg::Positional(a_span) => {
                             return Err(SyntaxError
                                 .make(span)
-                                .with_message(format!("Missing required argument: {}", name))
+                                .with_message(format!("Missing required argument {name:?}"))
                                 .with_label(a_span.label().with_color(Color::Blue))
-                                .into())
+                                .into());
                         }
-                        FunctionArg::PositionalVariadic(span) => {
-                            let values = Vec::default();
-                            scope.borrow_mut().declare(
-                                name,
-                                Value::Tuple(ref_it!(values)),
-                                *span,
-                            )?
+                        FunctionArg::PositionalVariadic(a_span) => {
+                            let default = Value::Tuple(ref_it!(Vec::new()));
+                            scope.borrow_mut().declare(name, default, *a_span)?;
                         }
-                        FunctionArg::Keyword(span, default) => {
-                            scope.borrow_mut().declare(name, default.clone(), *span)?;
+                        FunctionArg::Keyword(a_span, default) => {
+                            scope.borrow_mut().declare(name, default.clone(), *a_span)?;
                         }
-                        FunctionArg::KeywordVariadic(_) => {
-                            unreachable!("Somehow didn't pop keyword variadic.")
-                        }
+                        _ => (),
                     }
                 }
 
@@ -270,7 +248,7 @@ impl Value {
                         }
                         Ok(val)
                     }
-                    FunctionRun::BuiltIn(func) => func(scope),
+                    FunctionRun::BuiltIn(func) => func(scope, span),
                 }
             }
             _ => Err(ValueError
@@ -280,8 +258,12 @@ impl Value {
         }
     }
 
-    pub fn repr(&self) -> Self {
-        Value::String(Rc::new(self.to_string()))
+    pub fn string_repr(&self) -> Self {
+        Value::String(Rc::new(self.as_string_repr()))
+    }
+
+    pub fn string(&self) -> Self {
+        Value::String(Rc::new(self.as_string()))
     }
 
     pub fn add(&self, other: &Self, span: Span) -> Result<Self> {
@@ -525,5 +507,13 @@ impl Value {
             Value::Function { .. } => true,
             Value::None => false,
         }
+    }
+
+    pub fn as_string(&self) -> String {
+        format!("{self}")
+    }
+
+    pub fn as_string_repr(&self) -> String {
+        format!("{self:?}")
     }
 }

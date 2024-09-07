@@ -9,7 +9,9 @@ use ParserReport::*;
 
 #[derive(NamedVariant)]
 enum ParserReport {
-    SyntaxError(String),
+    SyntaxError,
+    InvalidFloat,
+    InvalidInteger(Base),
     UnexpectedToken(TokenKind),
     UnexpectedEOF,
 }
@@ -18,7 +20,7 @@ impl Display for ParserReport {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.variant_name())?;
         match self {
-            SyntaxError(title) => write!(f, ": {title}")?,
+            InvalidInteger(base) => write!(f, ": of base {base:?}")?,
             UnexpectedToken(kind) => write!(f, ": {kind}")?,
             _ => (),
         }
@@ -29,7 +31,9 @@ impl Display for ParserReport {
 impl From<ParserReport> for ReportLevel {
     fn from(value: ParserReport) -> Self {
         match value {
-            SyntaxError(_) | UnexpectedToken(_) | UnexpectedEOF => Self::Error,
+            InvalidFloat | InvalidInteger(_) | SyntaxError | UnexpectedToken(_) | UnexpectedEOF => {
+                Self::Error
+            }
         }
     }
 }
@@ -687,11 +691,9 @@ impl<'contents> Parser<'contents> {
             }
             TokenKind::FloatLiteral => {
                 self.advance();
-                let val = text.parse().map_err(|err| {
-                    SyntaxError("Invalid Float".to_string())
-                        .make(span)
-                        .with_message(err)
-                })?;
+                let val = text
+                    .parse()
+                    .map_err(|err| InvalidFloat.make(span).with_message(err))?;
                 Ok(NodeKind::FloatLiteral(val).make(span).into())
             }
             TokenKind::IntegerLiteralBin
@@ -707,13 +709,8 @@ impl<'contents> Parser<'contents> {
                     TokenKind::IntegerLiteralHex => (Base::Hexadecimal, 16),
                     _ => unreachable!(),
                 };
-                let val = usize::from_str_radix(text, radix).map_err(|err| {
-                    Box::new(
-                        SyntaxError(format!("Invalid {base:?} Integer"))
-                            .make(span)
-                            .with_message(err),
-                    )
-                })?;
+                let val = usize::from_str_radix(text, radix)
+                    .map_err(|err| Box::new(InvalidInteger(base).make(span).with_message(err)))?;
                 Ok(NodeKind::IntegerLiteral(val).make(span).into())
             }
             TokenKind::None => {
@@ -728,9 +725,8 @@ impl<'contents> Parser<'contents> {
     }
 
     fn parse_arguments(&mut self, closer: TokenKind) -> Result<Vec<FunctionArg>> {
-        let mut arg_state = FunctionArgState::Positional;
-        let (mut posv, mut keyv) = (false, false);
         let mut arguments = Vec::new();
+        let (mut pos_v, mut key_v) = (false, false);
         while self.current.kind != closer {
             if !arguments.is_empty() {
                 self.consume_one(TokenKind::Comma)?;
@@ -740,41 +736,31 @@ impl<'contents> Parser<'contents> {
                 TokenKind::Star => {
                     self.advance();
                     let ident = self.consume_one(TokenKind::Identifier)?;
-                    if posv {
-                        return Err(SyntaxError("InvalidArgument".to_string())
-                            .make(ident.span.extend(start))
-                            .with_message("* Argument can only appear once")
+                    let span = start.extend(ident.span);
+                    if pos_v {
+                        return Err(SyntaxError
+                            .make(span)
+                            .with_message("* argument must be the final argument")
                             .into());
                     }
-                    let span = start.extend(ident.span);
-                    arg_state = arg_state.move_to(
-                        FunctionArgState::PositionalVariadic,
-                        span,
-                        "* Must come before keyword or **",
-                    )?;
-                    posv = true;
+                    pos_v = true;
                     arguments.push(FunctionArg::PositionalVariadic(
                         span,
                         ident.text.to_string(),
-                    ))
+                    ));
                 }
                 TokenKind::StarStar => {
                     self.advance();
                     let ident = self.consume_one(TokenKind::Identifier)?;
                     let span = start.extend(ident.span);
-                    if keyv {
-                        return Err(SyntaxError("InvalidArgument".to_string())
+                    if key_v {
+                        return Err(SyntaxError
                             .make(span)
-                            .with_message("** Argument can only appear once")
+                            .with_message("** argument must be the final argument")
                             .into());
                     }
-                    arg_state = arg_state.move_to(
-                        FunctionArgState::KeywordVariadic,
-                        span,
-                        "should never happen",
-                    )?;
-                    keyv = true;
-                    arguments.push(FunctionArg::KeywordVariadic(span, ident.text.to_string()))
+                    key_v = true;
+                    arguments.push(FunctionArg::KeywordVariadic(span, ident.text.to_string()));
                 }
                 _ => {
                     let ident = self.consume_one(TokenKind::Identifier)?;
@@ -783,21 +769,15 @@ impl<'contents> Parser<'contents> {
                             self.advance();
                             let expr = self.parse_expression()?;
                             let span = start.extend(expr.span);
-                            arg_state = arg_state.move_to(
-                                FunctionArgState::Keyword,
+                            arguments.push(FunctionArg::Keyword(
                                 span,
-                                "Default arguments must come before **",
-                            )?;
-                            arguments.push(FunctionArg::Keyword(span, ident.text.to_string(), expr))
+                                ident.text.to_string(),
+                                expr,
+                            ));
                         }
                         _ => {
                             let span = start.extend(ident.span);
-                            arg_state = arg_state.move_to(
-                                FunctionArgState::Positional,
-                                span,
-                                "Positional arguments must come before *, keyword, or **",
-                            )?;
-                            arguments.push(FunctionArg::Positional(span, ident.text.to_string()))
+                            arguments.push(FunctionArg::Positional(span, ident.text.to_string()));
                         }
                     }
                 }
@@ -826,27 +806,6 @@ impl<'contents> Parser<'contents> {
             _ => Some(self.parse_expression()?),
         };
         Ok((start, inclusive, end))
-    }
-}
-
-#[derive(Debug, PartialOrd, PartialEq, Copy, Clone)]
-pub enum FunctionArgState {
-    Positional,
-    PositionalVariadic,
-    Keyword,
-    KeywordVariadic,
-}
-
-impl FunctionArgState {
-    pub fn move_to<T: Display>(self, other: Self, span: Span, text: T) -> Result<Self> {
-        if other >= self {
-            Ok(other)
-        } else {
-            Err(SyntaxError("InvalidArugment".to_string())
-                .make(span)
-                .with_message(text)
-                .into())
-        }
     }
 }
 

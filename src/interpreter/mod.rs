@@ -62,6 +62,31 @@ impl Interpreter {
         }
     }
 
+    pub fn register_builtins_to_scope(scope: Ref<Scope>) -> Ref<Scope> {
+        macro_rules! register_builtins {
+            ($($name:ident: ($data_path:path, $run_path:path)),+$(,)?) => {
+                $(
+                let (span, args) = $data_path();
+                let builtin = Value::Function(ref_it!(value::Function {
+                    span,
+                    name: None,
+                    args,
+                    scope: scope.clone(),
+                    run: FunctionRun::BuiltIn(&$run_path)
+                }));
+                match scope.borrow_mut().declare(stringify!($name), builtin, span) {
+                    _ => (),
+                }
+                )+
+            };
+        }
+        register_builtins!(
+            print:(builtin::print_data,builtin::print_run),
+            debug:(builtin::debug_data,builtin::debug_run),
+        );
+        scope
+    }
+
     pub fn run_and_return_scope(&mut self, node: &Node) -> Result<Ref<Scope>> {
         let scope = Scope::new(None);
         self.run_block(node, scope.clone()).map(|_| scope)
@@ -222,7 +247,7 @@ impl Interpreter {
                 }
             }
             NodeKind::Return(expr) => {
-                if scope.borrow().in_function {
+                if !scope.borrow().in_function {
                     return Err(SyntaxError
                         .make(span)
                         .with_message("Return used outside of function")
@@ -274,7 +299,7 @@ impl Interpreter {
             NodeKind::VariableAccess(key) => scope.borrow_mut().assign(key.as_str(), value, span),
             _ => Err(SyntaxError
                 .make(span)
-                .with_message("Return used outside of function")
+                .with_message("Invalid assignment target")
                 .into()),
         }
     }
@@ -297,10 +322,13 @@ pub struct Scope {
 
 impl Scope {
     pub fn new(parent: Option<Ref<Self>>) -> Ref<Self> {
+        let in_function = parent
+            .clone()
+            .map_or(false, |scope| scope.borrow().in_function);
         ref_it!(Self {
             parent,
             variables: HashMap::new(),
-            in_function: false,
+            in_function
         })
     }
 

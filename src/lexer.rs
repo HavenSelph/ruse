@@ -149,7 +149,7 @@ impl<'contents> Lexer<'contents> {
                     continue;
                 }
                 'a'..='z' | 'A'..='Z' | '_' => {
-                    while let Some('a'..='z' | 'A'..='Z' | '_') = self.current_char {
+                    while let Some('a'..='z' | 'A'..='Z' | '_' | '0'..='9') = self.current_char {
                         self.advance();
                     }
                     let kind = match self.slice(start, self.current_index) {

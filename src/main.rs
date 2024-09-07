@@ -29,8 +29,8 @@ fn main() {
     reporter.check_reports();
 
     let mut interpreter = Interpreter::new();
-    let val = interpreter
-        .run_block(ast.as_ref(), Scope::new(None))
-        .unwrap_report();
+    let scope = Scope::new(None);
+    Interpreter::register_builtins_to_scope(scope.clone());
+    let val = interpreter.run_block(ast.as_ref(), scope).unwrap_report();
     dprintln!("{val}");
 }
