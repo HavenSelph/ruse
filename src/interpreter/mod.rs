@@ -1,7 +1,8 @@
-use crate::ast::{BinaryOp, Node, NodeKind, UnaryOp};
-use crate::interpreter::value::Value;
+use crate::ast::{BinaryOp, CallArg, FunctionArg, Node, NodeKind, UnaryOp};
+use crate::interpreter::value::{Function, FunctionRun, Value};
 use crate::report::{ReportKind, ReportLevel, Result};
 use crate::span::Span;
+use indexmap::IndexMap;
 use name_variant::NamedVariant;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -9,13 +10,14 @@ use std::fmt::{Display, Formatter};
 use std::rc::Rc;
 use InterpreterReport::*;
 
+mod builtin;
 mod value;
 
 #[derive(NamedVariant)]
 enum InterpreterReport {
     VariableNotFound(String),
     VariableAlreadyExists(String),
-    SyntaxError(String),
+    SyntaxError,
 }
 
 impl Display for InterpreterReport {
@@ -24,7 +26,7 @@ impl Display for InterpreterReport {
         match self {
             VariableNotFound(string) => write!(f, ": {string}")?,
             VariableAlreadyExists(string) => write!(f, ": {string}")?,
-            SyntaxError(string) => write!(f, ": {string}")?,
+            SyntaxError => (),
         }
         Ok(())
     }
@@ -33,7 +35,7 @@ impl Display for InterpreterReport {
 impl From<InterpreterReport> for ReportLevel {
     fn from(value: InterpreterReport) -> Self {
         match value {
-            SyntaxError(_) | VariableAlreadyExists(_) | VariableNotFound(_) => Self::Error,
+            SyntaxError | VariableAlreadyExists(_) | VariableNotFound(_) => Self::Error,
         }
     }
 }
@@ -154,7 +156,7 @@ impl Interpreter {
                 self.handle_assign(lhs, value, scope.clone(), span)
             }
             NodeKind::NoneLiteral => Ok(Value::None),
-            NodeKind::StringLiteral(string) => Ok(Value::String(string.to_string())),
+            NodeKind::StringLiteral(string) => Ok(Value::String(Rc::new(string.to_string()))),
             NodeKind::FloatLiteral(val) => Ok(Value::Float(*val)),
             NodeKind::IntegerLiteral(val) => Ok(Value::Integer(*val as isize)),
             NodeKind::BooleanLiteral(val) => Ok(Value::Boolean(*val)),
@@ -165,10 +167,10 @@ impl Interpreter {
                 BinaryOp::Divide => dispatch_op!(Value::divide, lhs, rhs),
                 BinaryOp::Modulus => dispatch_op!(Value::modulo, lhs, rhs),
                 BinaryOp::Power => dispatch_op!(Value::power, lhs, rhs),
-                BinaryOp::LogicalOr => dispatch_op!(Value::logical_or, lhs, rhs),
-                BinaryOp::LogicalAnd => dispatch_op!(Value::logical_and, lhs, rhs),
-                BinaryOp::CompareEq => dispatch_op!(Value::equals, lhs, rhs),
-                BinaryOp::CompareNotEq => dispatch_op!(Value::equals, lhs, rhs)?.negate(span),
+                BinaryOp::LogicalOr => Ok(dispatch_op!(Value::logical_or, lhs, rhs)),
+                BinaryOp::LogicalAnd => Ok(dispatch_op!(Value::logical_and, lhs, rhs)),
+                BinaryOp::CompareEq => Ok(dispatch_op!(Value::equals, lhs, rhs)),
+                BinaryOp::CompareNotEq => Ok(dispatch_op!(Value::not_equals, lhs, rhs)),
                 BinaryOp::CompareGreaterThan => dispatch_op!(Value::greater_than, lhs, rhs),
                 BinaryOp::CompareGreaterThanEq => dispatch_op!(Value::greater_than_equal, lhs, rhs),
                 BinaryOp::CompareLessThan => dispatch_op!(Value::less_than, lhs, rhs),
@@ -182,7 +184,83 @@ impl Interpreter {
                 let scope = Scope::new(Some(scope));
                 self.run_block(node, scope)
             }
+            NodeKind::Function {
+                name,
+                body,
+                args: raw_args,
+            } => {
+                let mut args = IndexMap::new();
+                for argument in raw_args.clone() {
+                    match argument {
+                        FunctionArg::Positional(span, name) => {
+                            args.insert(name.clone(), value::FunctionArg::Positional(span));
+                        }
+                        FunctionArg::PositionalVariadic(span, name) => {
+                            args.insert(name.clone(), value::FunctionArg::PositionalVariadic(span));
+                        }
+                        FunctionArg::Keyword(span, name, default) => {
+                            let value = self.run(&default, scope.clone())?;
+                            args.insert(name.clone(), value::FunctionArg::Keyword(span, value));
+                        }
+                        FunctionArg::KeywordVariadic(_span, name) => {
+                            args.insert(name.clone(), value::FunctionArg::KeywordVariadic(()));
+                        }
+                    }
+                }
+                let function = Value::Function(ref_it!(Function {
+                    span,
+                    name: name.clone(),
+                    args,
+                    scope: scope.clone(),
+                    run: FunctionRun::Program(body.clone()),
+                }));
+                if let Some(name) = name {
+                    scope.borrow_mut().declare(name, function, span)?;
+                    Ok(Value::None)
+                } else {
+                    Ok(function)
+                }
+            }
+            NodeKind::Return(expr) => {
+                if scope.borrow().in_function {
+                    return Err(SyntaxError
+                        .make(span)
+                        .with_message("Return used outside of function")
+                        .into());
+                }
+                let value = if let Some(expr) = expr {
+                    self.run(expr, scope.clone())?
+                } else {
+                    Value::None
+                };
+                self.control_flow = ControlFlow::Return;
+                Ok(value)
+            }
+            NodeKind::Call(expr, args) => self.handle_call(expr, args, scope, span),
         }
+    }
+
+    pub fn handle_call(
+        &mut self,
+        node: &Node,
+        call_args: &[CallArg],
+        scope: Ref<Scope>,
+        span: Span,
+    ) -> Result<Value> {
+        let callee = self.run(node, scope.clone())?;
+        let mut args = Vec::with_capacity(call_args.len());
+        for arg in call_args.iter() {
+            let value_arg = match arg {
+                CallArg::Positional(span, node) => {
+                    value::CallArg::Positional(*span, self.run(node, scope.clone())?)
+                }
+                CallArg::Keyword(span, string, node) => {
+                    value::CallArg::Keyword(*span, string.clone(), self.run(node, scope.clone())?)
+                }
+            };
+            args.push(value_arg);
+        }
+        callee.call(self, args, span)
     }
 
     pub fn handle_assign(
@@ -194,24 +272,27 @@ impl Interpreter {
     ) -> Result<Value> {
         match &key.kind {
             NodeKind::VariableAccess(key) => scope.borrow_mut().assign(key.as_str(), value, span),
-            _ => Err(SyntaxError("Invalid Assignment Target".to_string())
+            _ => Err(SyntaxError
                 .make(span)
+                .with_message("Return used outside of function")
                 .into()),
         }
     }
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 enum ControlFlow {
     None,
     Continue,
     Break,
-    Return(Value),
+    Return,
 }
 
 pub struct Scope {
     parent: Option<Ref<Scope>>,
     variables: HashMap<String, Value>,
+    in_function: bool,
 }
 
 impl Scope {
@@ -219,6 +300,7 @@ impl Scope {
         ref_it!(Self {
             parent,
             variables: HashMap::new(),
+            in_function: false,
         })
     }
 

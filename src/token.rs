@@ -14,6 +14,7 @@ pub enum TokenKind {
     Else,
     Equals,
     EqualsEquals,
+    FatArrow,
     FloatLiteral,
     GreaterThan,
     GreaterThanEquals,

@@ -29,8 +29,8 @@ fn main() {
     reporter.check_reports();
 
     let mut interpreter = Interpreter::new();
-    match interpreter.run_block(ast.as_ref(), Scope::new(None)) {
-        Ok(val) => println!("{}", val),
-        Err(err) => reporter.get_sender().report(err.finish().into()),
-    }
+    let val = interpreter
+        .run_block(ast.as_ref(), Scope::new(None))
+        .unwrap_report();
+    dprintln!("{val}");
 }

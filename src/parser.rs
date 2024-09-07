@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, Node, NodeKind, UnaryOp};
+use crate::ast::{BinaryOp, CallArg, FunctionArg, Node, NodeKind, UnaryOp};
 use crate::lexer::{Base, Lexer, LexerIterator};
 use crate::report::{Report, ReportKind, ReportLevel, ReportSender, Result};
 use crate::span::Span;
@@ -6,8 +6,6 @@ use crate::token::{Token, TokenKind};
 use name_variant::NamedVariant;
 use std::fmt::{Display, Formatter};
 use ParserReport::*;
-
-type SliceValue = (Option<Box<Node>>, bool, Option<Box<Node>>);
 
 #[derive(NamedVariant)]
 enum ParserReport {
@@ -88,12 +86,24 @@ impl<'contents> Parser<'contents> {
     }
 
     fn sync<F: Fn(Token) -> bool>(&mut self, predicate: F) {
-        self.skip_until(
-            |token| /* Is it a new statement? */matches!(token.kind, TokenKind::SemiColon | TokenKind::Let | TokenKind::If | TokenKind::Else) || token.newline_before || predicate(token),
-        );
+        self.skip_until(|token| /* Is it a new statement? */matches!(token.kind,
+                TokenKind::SemiColon
+                | TokenKind::Let
+                | TokenKind::If
+                | TokenKind::Else
+                | TokenKind::Fn
+                | TokenKind::For
+                | TokenKind::At
+            ) || token.newline_before || predicate(token));
         if self.current.kind == TokenKind::SemiColon {
             self.advance();
         }
+    }
+
+    fn peek_is(&mut self, kind: TokenKind) -> bool {
+        self.lexer
+            .peek()
+            .is_some_and(|result| result.as_ref().is_ok_and(|token| token.kind == kind))
     }
 
     fn consume<F: FnOnce(&Token) -> bool, T: Display>(
@@ -210,7 +220,7 @@ impl<'contents> Parser<'contents> {
         }
         let end = self.consume_one(closer)?.span;
 
-        Ok(NodeKind::Block(stmts).make(start.extend(&end)).into())
+        Ok(NodeKind::Block(stmts).make(start.extend(end)).into())
     }
 
     fn parse_statement(&mut self) -> Result<Box<Node>> {
@@ -225,8 +235,55 @@ impl<'contents> Parser<'contents> {
                 self.consume_one(TokenKind::Equals)?;
                 let expr = self.parse_expression()?;
                 self.consume_line()?;
-                let span = span.extend(&expr.span);
+                let span = span.extend(expr.span);
                 Ok(NodeKind::VariableDeclaration(ident, expr).make(span).into())
+            }
+            Token {
+                kind: TokenKind::Return,
+                span,
+                ..
+            } => {
+                self.advance();
+                let (span, expr) = match self.current.kind {
+                    TokenKind::SemiColon => (span, None),
+                    _ => {
+                        let expr = self.parse_expression()?;
+                        (span.extend(expr.span), Some(expr))
+                    }
+                };
+                Ok(NodeKind::Return(expr).make(span).into())
+            }
+            Token {
+                kind: TokenKind::Fn,
+                span,
+                ..
+            } => {
+                self.advance();
+                let name = self.consume_one(TokenKind::Identifier)?.text.to_string();
+                self.consume_one(TokenKind::LeftParen)?;
+                let args = self.parse_arguments(TokenKind::RightParen)?;
+                self.consume_one(TokenKind::RightParen)?;
+                let body = self.consume(
+                    |t| matches!(t.kind, TokenKind::LeftBrace | TokenKind::FatArrow),
+                    "expected function body",
+                )?;
+                let body = match body.kind {
+                    TokenKind::LeftBrace => self.parse_block(body.span, TokenKind::RightBrace)?,
+                    TokenKind::FatArrow => {
+                        let expr = self.parse_expression()?;
+                        self.consume_line()?;
+                        expr
+                    }
+                    _ => unreachable!(),
+                };
+                let span = span.extend(body.span);
+                Ok(NodeKind::Function {
+                    name: Some(name),
+                    args,
+                    body,
+                }
+                .make(span)
+                .into())
             }
             _ => self.parse_expression(),
         }
@@ -237,12 +294,12 @@ impl<'contents> Parser<'contents> {
     }
 
     fn parse_assignment(&mut self) -> Result<Box<Node>> {
-        let left = self.parse_if_expression()?;
+        let left = self.parse_lambda()?;
         match self.current.kind {
             TokenKind::Equals => {
                 self.advance();
                 let right = self.parse_assignment()?;
-                let span = left.span.extend(&right.span);
+                let span = left.span.extend(right.span);
                 Ok(NodeKind::Assignment(left, right).make(span).into())
             }
             TokenKind::PlusEquals
@@ -262,12 +319,53 @@ impl<'contents> Parser<'contents> {
                 };
                 self.advance();
                 let expr = self.parse_assignment()?;
-                let span = left.span.extend(&expr.span);
+                let span = left.span.extend(expr.span);
                 Ok(NodeKind::CompoundAssignment(op, left, expr)
                     .make(span)
                     .into())
             }
             _ => Ok(left),
+        }
+    }
+
+    fn parse_lambda(&mut self) -> Result<Box<Node>> {
+        match self.current {
+            Token {
+                kind: TokenKind::Pipe,
+                span,
+                ..
+            } => {
+                self.advance();
+                let args = self.parse_arguments(TokenKind::Pipe)?;
+                self.consume_one(TokenKind::Pipe)?;
+                let body = self.parse_lambda()?;
+                let span = span.extend(body.span);
+                Ok(NodeKind::Function {
+                    name: None,
+                    args,
+                    body,
+                }
+                .make(span)
+                .into())
+            }
+            Token {
+                kind: TokenKind::PipePipe,
+                span,
+                ..
+            } => {
+                self.advance();
+                let args = Vec::default();
+                let body = self.parse_lambda()?;
+                let span = span.extend(body.span);
+                Ok(NodeKind::Function {
+                    name: None,
+                    args,
+                    body,
+                }
+                .make(span)
+                .into())
+            }
+            _ => self.parse_if_expression(),
         }
     }
 
@@ -279,7 +377,7 @@ impl<'contents> Parser<'contents> {
                 let true_expression = self.parse_if_expression()?;
                 self.consume_one(TokenKind::Colon)?;
                 let false_expression = self.parse_if_expression()?;
-                let span = condition.span.extend(&false_expression.span);
+                let span = condition.span.extend(false_expression.span);
                 Ok(
                     NodeKind::IfStatement(condition, true_expression, Some(false_expression))
                         .make(span)
@@ -298,7 +396,7 @@ impl<'contents> Parser<'contents> {
                 ..
             } => {
                 self.advance();
-                let condition = self.parse_expression()?;
+                let condition = self.parse_if()?;
                 let true_span = self.consume_one(TokenKind::LeftBrace)?.span;
                 let true_block = self.parse_block(true_span, TokenKind::RightBrace)?;
                 let (end, else_block) = if self.current.kind == TokenKind::Else {
@@ -314,7 +412,7 @@ impl<'contents> Parser<'contents> {
                     (true_block.span, None)
                 };
                 Ok(NodeKind::IfStatement(condition, true_block, else_block)
-                    .make(span.extend(&end))
+                    .make(span.extend(end))
                     .into())
             }
             _ => self.parse_logical_or(),
@@ -327,7 +425,7 @@ impl<'contents> Parser<'contents> {
             TokenKind::PipePipe => {
                 self.advance();
                 let rhs = self.parse_logical_or()?;
-                let span = lhs.span.extend(&rhs.span);
+                let span = lhs.span.extend(rhs.span);
                 Ok(NodeKind::BinaryOperation(BinaryOp::LogicalOr, lhs, rhs)
                     .make(span)
                     .into())
@@ -342,7 +440,7 @@ impl<'contents> Parser<'contents> {
             TokenKind::AmpersandAmpersand => {
                 self.advance();
                 let rhs = self.parse_logical_and()?;
-                let span = lhs.span.extend(&rhs.span);
+                let span = lhs.span.extend(rhs.span);
                 Ok(NodeKind::BinaryOperation(BinaryOp::LogicalAnd, lhs, rhs)
                     .make(span)
                     .into())
@@ -371,7 +469,7 @@ impl<'contents> Parser<'contents> {
                 };
                 self.advance();
                 let rhs = self.parse_comparison()?;
-                let span = lhs.span.extend(&rhs.span);
+                let span = lhs.span.extend(rhs.span);
                 Ok(NodeKind::BinaryOperation(op, lhs, rhs).make(span).into())
             }
             _ => Ok(lhs),
@@ -389,7 +487,7 @@ impl<'contents> Parser<'contents> {
                 };
                 self.advance();
                 let rhs = self.parse_additive()?;
-                let span = lhs.span.extend(&rhs.span);
+                let span = lhs.span.extend(rhs.span);
                 Ok(NodeKind::BinaryOperation(op, lhs, rhs).make(span).into())
             }
             _ => Ok(lhs),
@@ -408,7 +506,7 @@ impl<'contents> Parser<'contents> {
                 };
                 self.advance();
                 let rhs = self.parse_multiplicative()?;
-                let span = lhs.span.extend(&rhs.span);
+                let span = lhs.span.extend(rhs.span);
                 Ok(NodeKind::BinaryOperation(op, lhs, rhs).make(span).into())
             }
             _ => Ok(lhs),
@@ -421,7 +519,7 @@ impl<'contents> Parser<'contents> {
             TokenKind::StarStar => {
                 self.advance();
                 let rhs = self.parse_exponential()?;
-                let span = lhs.span.extend(&rhs.span);
+                let span = lhs.span.extend(rhs.span);
                 Ok(NodeKind::BinaryOperation(BinaryOp::Power, lhs, rhs)
                     .make(span)
                     .into())
@@ -441,7 +539,7 @@ impl<'contents> Parser<'contents> {
                 let expr = self.parse_prefix()?;
                 let end = expr.span;
                 Ok(NodeKind::UnaryOperation(UnaryOp::LogicalNot, expr)
-                    .make(span.extend(&end))
+                    .make(span.extend(end))
                     .into())
             }
             Token {
@@ -451,7 +549,7 @@ impl<'contents> Parser<'contents> {
             } => {
                 self.skip_until(|token| token.kind != TokenKind::Plus);
                 let mut expr = self.parse_prefix()?;
-                expr.span = span.extend(&expr.span);
+                expr.span = span.extend(expr.span);
                 Ok(expr)
             }
             Token {
@@ -463,7 +561,7 @@ impl<'contents> Parser<'contents> {
                 let expr = self.parse_prefix()?;
                 let end = expr.span;
                 Ok(NodeKind::UnaryOperation(UnaryOp::Negate, expr)
-                    .make(span.extend(&end))
+                    .make(span.extend(end))
                     .into())
             }
             _ => self.parse_postfix(),
@@ -478,7 +576,7 @@ impl<'contents> Parser<'contents> {
                     self.advance();
                     let (start, inclusive, stop) =
                         self.parse_slice_value(TokenKind::RightBracket)?;
-                    let end = &self.consume_one(TokenKind::RightBracket)?.span;
+                    let end = self.consume_one(TokenKind::RightBracket)?.span;
                     let span = lhs.span.extend(end);
                     lhs = NodeKind::Subscript {
                         lhs,
@@ -491,7 +589,30 @@ impl<'contents> Parser<'contents> {
                 }
                 TokenKind::LeftParen => {
                     self.advance();
-                    todo!("Woah there dummy you didn't do this lol nerd")
+                    let mut args = Vec::new();
+                    while self.current.kind != TokenKind::RightParen {
+                        if !args.is_empty() {
+                            self.consume_one(TokenKind::Comma)?;
+                        }
+                        if self.current.kind == TokenKind::Identifier
+                            && self.peek_is(TokenKind::Equals)
+                        {
+                            let ident = self.consume_one(TokenKind::Identifier)?;
+                            self.consume_one(TokenKind::Equals)?;
+                            let expr = self.parse_expression()?;
+                            args.push(CallArg::Keyword(
+                                ident.span.extend(expr.span),
+                                ident.text.to_string(),
+                                expr,
+                            ))
+                        } else {
+                            let expr = self.parse_expression()?;
+                            args.push(CallArg::Positional(expr.span, expr))
+                        }
+                    }
+                    let end = self.consume_one(TokenKind::RightParen)?.span;
+                    let span = lhs.span.extend(end);
+                    lhs = NodeKind::Call(lhs, args).make(span).into();
                 }
                 _ => break Ok(lhs),
             }
@@ -519,7 +640,7 @@ impl<'contents> Parser<'contents> {
                     self.advance();
                 }
                 let end = self.consume_one(TokenKind::RightBracket)?.span;
-                Ok(NodeKind::ArrayLiteral(stmts).make(span.extend(&end)).into())
+                Ok(NodeKind::ArrayLiteral(stmts).make(span.extend(end)).into())
             }
             TokenKind::LeftParen => {
                 self.advance();
@@ -540,10 +661,10 @@ impl<'contents> Parser<'contents> {
                 }
                 let end = self.consume_one(TokenKind::RightParen)?.span;
                 if tuple || stmts.is_empty() {
-                    Ok(NodeKind::TupleLiteral(stmts).make(span.extend(&end)).into())
+                    Ok(NodeKind::TupleLiteral(stmts).make(span.extend(end)).into())
                 } else {
                     let mut expr = stmts.pop().unwrap();
-                    expr.span = span.extend(&end);
+                    expr.span = span.extend(end);
                     Ok(expr.into())
                 }
             }
@@ -606,6 +727,85 @@ impl<'contents> Parser<'contents> {
         }
     }
 
+    fn parse_arguments(&mut self, closer: TokenKind) -> Result<Vec<FunctionArg>> {
+        let mut arg_state = FunctionArgState::Positional;
+        let (mut posv, mut keyv) = (false, false);
+        let mut arguments = Vec::new();
+        while self.current.kind != closer {
+            if !arguments.is_empty() {
+                self.consume_one(TokenKind::Comma)?;
+            }
+            let start = self.current.span;
+            match self.current.kind {
+                TokenKind::Star => {
+                    self.advance();
+                    let ident = self.consume_one(TokenKind::Identifier)?;
+                    if posv {
+                        return Err(SyntaxError("InvalidArgument".to_string())
+                            .make(ident.span.extend(start))
+                            .with_message("* Argument can only appear once")
+                            .into());
+                    }
+                    let span = start.extend(ident.span);
+                    arg_state = arg_state.move_to(
+                        FunctionArgState::PositionalVariadic,
+                        span,
+                        "* Must come before keyword or **",
+                    )?;
+                    posv = true;
+                    arguments.push(FunctionArg::PositionalVariadic(
+                        span,
+                        ident.text.to_string(),
+                    ))
+                }
+                TokenKind::StarStar => {
+                    self.advance();
+                    let ident = self.consume_one(TokenKind::Identifier)?;
+                    let span = start.extend(ident.span);
+                    if keyv {
+                        return Err(SyntaxError("InvalidArgument".to_string())
+                            .make(span)
+                            .with_message("** Argument can only appear once")
+                            .into());
+                    }
+                    arg_state = arg_state.move_to(
+                        FunctionArgState::KeywordVariadic,
+                        span,
+                        "should never happen",
+                    )?;
+                    keyv = true;
+                    arguments.push(FunctionArg::KeywordVariadic(span, ident.text.to_string()))
+                }
+                _ => {
+                    let ident = self.consume_one(TokenKind::Identifier)?;
+                    match self.current.kind {
+                        TokenKind::Equals => {
+                            self.advance();
+                            let expr = self.parse_expression()?;
+                            let span = start.extend(expr.span);
+                            arg_state = arg_state.move_to(
+                                FunctionArgState::Keyword,
+                                span,
+                                "Default arguments must come before **",
+                            )?;
+                            arguments.push(FunctionArg::Keyword(span, ident.text.to_string(), expr))
+                        }
+                        _ => {
+                            let span = start.extend(ident.span);
+                            arg_state = arg_state.move_to(
+                                FunctionArgState::Positional,
+                                span,
+                                "Positional arguments must come before *, keyword, or **",
+                            )?;
+                            arguments.push(FunctionArg::Positional(span, ident.text.to_string()))
+                        }
+                    }
+                }
+            };
+        }
+        Ok(arguments)
+    }
+
     fn parse_slice_value(&mut self, closer: TokenKind) -> Result<SliceValue> {
         let start = match self.current.kind {
             kind if kind == closer => return Ok((None, false, None)),
@@ -628,3 +828,26 @@ impl<'contents> Parser<'contents> {
         Ok((start, inclusive, end))
     }
 }
+
+#[derive(Debug, PartialOrd, PartialEq, Copy, Clone)]
+pub enum FunctionArgState {
+    Positional,
+    PositionalVariadic,
+    Keyword,
+    KeywordVariadic,
+}
+
+impl FunctionArgState {
+    pub fn move_to<T: Display>(self, other: Self, span: Span, text: T) -> Result<Self> {
+        if other >= self {
+            Ok(other)
+        } else {
+            Err(SyntaxError("InvalidArugment".to_string())
+                .make(span)
+                .with_message(text)
+                .into())
+        }
+    }
+}
+
+type SliceValue = (Option<Box<Node>>, bool, Option<Box<Node>>);

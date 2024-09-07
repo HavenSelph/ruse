@@ -206,6 +206,7 @@ impl<'contents> Lexer<'contents> {
                 }
                 '=' => match self.peek_char() {
                     Some('=') => self.make_advance(start, 2, TokenKind::EqualsEquals),
+                    Some('>') => self.make_advance(start, 2, TokenKind::FatArrow),
                     _ => self.make_advance(start, 1, TokenKind::Equals),
                 },
                 '-' => match self.peek_char() {

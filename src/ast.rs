@@ -2,7 +2,7 @@ use crate::span::Span;
 use name_variant::NamedVariant;
 use std::fmt::{Debug, Display, Formatter};
 
-#[derive(NamedVariant)]
+#[derive(NamedVariant, Clone)]
 pub enum BinaryOp {
     Add,
     Subtract,
@@ -20,18 +20,35 @@ pub enum BinaryOp {
     CompareLessThanEq,
 }
 
-#[derive(NamedVariant)]
+#[derive(NamedVariant, Clone)]
 pub enum UnaryOp {
     LogicalNot,
     Negate,
 }
 
-#[derive(NamedVariant)]
+#[derive(Clone)]
+pub enum FunctionArg {
+    Positional(Span, String),
+    PositionalVariadic(Span, String),
+    Keyword(Span, String, Box<Node>),
+    KeywordVariadic(Span, String),
+}
+
+#[derive(Clone)]
+pub enum CallArg {
+    Positional(Span, Box<Node>),
+    Keyword(Span, String, Box<Node>),
+}
+
+#[derive(NamedVariant, Clone)]
 pub enum NodeKind {
     NoneLiteral,
-    // Function {
-    //     positional: Vec<Node>,
-    // },
+    Return(Option<Box<Node>>),
+    Function {
+        name: Option<String>,
+        args: Vec<FunctionArg>,
+        body: Box<Node>,
+    },
     Subscript {
         lhs: Box<Node>,
         start: Option<Box<Node>>,
@@ -52,6 +69,7 @@ pub enum NodeKind {
     BinaryOperation(BinaryOp, Box<Node>, Box<Node>),
     UnaryOperation(UnaryOp, Box<Node>),
     Block(Vec<Node>),
+    Call(Box<Node>, Vec<CallArg>),
 }
 
 impl NodeKind {
@@ -60,6 +78,7 @@ impl NodeKind {
     }
 }
 
+#[derive(Clone)]
 pub struct Node {
     pub kind: NodeKind,
     pub span: Span,
@@ -163,6 +182,11 @@ impl<'a> Display for NodeFormatter<'a> {
         let node = self.node;
         write!(f, "{}", node.kind.variant_name())?;
         match &node.kind {
+            NodeKind::Return(expr) => {
+                if let Some(expr) = expr {
+                    write!(f, " {{\n{}\n}}", self.child(expr))?;
+                }
+            }
             NodeKind::NoneLiteral => (),
             NodeKind::Subscript {
                 lhs,
@@ -248,6 +272,53 @@ impl<'a> Display for NodeFormatter<'a> {
                     writeln!(f, "None")?;
                     f.dedent(2);
                 }
+                write!(f, "}}")?;
+            }
+            NodeKind::Function { name, args, body } => {
+                if let Some(name) = name {
+                    write!(f, "({name})")?;
+                } else {
+                    write!(f, "(<anonymous>)")?;
+                }
+                writeln!(f, " {{")?;
+                f.indent(2);
+                writeln!(f, "Arguments (")?;
+                f.indent(2);
+                for arg in args {
+                    match arg {
+                        FunctionArg::Positional(_, name) => writeln!(f, "{name},")?,
+                        FunctionArg::PositionalVariadic(_, name) => writeln!(f, "*{name},")?,
+                        FunctionArg::KeywordVariadic(_, name) => writeln!(f, "**{name},")?,
+                        FunctionArg::Keyword(_, name, default) => {
+                            writeln!(f, "{name}={{\n{}\n}},", self.child(default))?;
+                        }
+                    }
+                }
+                f.dedent(2);
+                writeln!(f, ")")?;
+                f.dedent(2);
+                writeln!(f, "{}", self.child(body))?;
+                write!(f, "}}")?;
+            }
+            NodeKind::Call(expr, args) => {
+                writeln!(f, " {{")?;
+                writeln!(f, "{}", self.child(expr))?;
+                f.indent(2);
+                writeln!(f, "Arguments (")?;
+                f.indent(2);
+                for arg in args {
+                    match arg {
+                        CallArg::Positional(_, expr) => writeln!(f, "{},", self.child(expr))?,
+                        CallArg::Keyword(_, name, expr) => {
+                            f.indent(2);
+                            writeln!(f, "{name} = {{\n{}\n}},", self.child(expr))?;
+                            f.dedent(2);
+                        }
+                    }
+                }
+                f.dedent(2);
+                writeln!(f, ")")?;
+                f.dedent(2);
                 write!(f, "}}")?;
             }
         }
