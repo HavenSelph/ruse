@@ -43,8 +43,11 @@ pub fn print_run(scope: Ref<Scope>, span: Span) -> Result<Value> {
     };
     let (sep, end) = (sep.as_string(), end.as_string());
 
-    for val in vals.borrow().iter() {
-        print!("{val}{sep}");
+    for (i, val) in vals.borrow().iter().enumerate() {
+        if i != 0 {
+            print!("{sep}");
+        }
+        print!("{val}");
     }
     print!("{end}");
     Ok(Value::None)
