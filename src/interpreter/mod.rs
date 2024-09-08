@@ -5,7 +5,6 @@ use crate::span::Span;
 use indexmap::IndexMap;
 use name_variant::NamedVariant;
 use std::cell::RefCell;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::rc::Rc;
@@ -127,7 +126,7 @@ impl Interpreter {
 
         match &node.kind {
             NodeKind::For(init, cond, loop_expr, body) => {
-                let scope = Scope::new(Some(scope));
+                let scope = Scope::new(Some(scope.clone()));
                 if let Some(init) = init {
                     self.run(init, scope.clone())?;
                 }
@@ -395,24 +394,14 @@ impl Scope {
         })
     }
 
-    fn with_entry<T, F: FnOnce(Entry<String, Value>) -> T>(&mut self, key: &str, f: F) -> T {
-        let entry = self.variables.entry(key.to_string());
-        if let Entry::Vacant(_) = entry {
-            if let Some(ref scope) = self.parent.clone() {
-                return scope.borrow_mut().with_entry(key, f);
-            }
-        }
-        f(entry)
-    }
-
     fn _get(&self, key: &str) -> Option<Value> {
-        self.variables
-            .get(key)
-            .cloned()
-            .or_else(|| match &self.parent {
-                Some(parent) => parent.borrow()._get(key),
+        match self.variables.get(key) {
+            Some(value) => Some(value.clone()),
+            None => match self.parent {
+                Some(ref parent) => parent.borrow()._get(key),
                 None => None,
-            })
+            },
+        }
     }
 
     pub fn get(&self, key: &str, span: Span) -> Result<Value> {
@@ -437,13 +426,15 @@ impl Scope {
         f: F,
         span: Span,
     ) -> Result<Value> {
-        self.with_entry(key, |entry| match entry {
-            Entry::Occupied(mut o) => {
-                let value = f(o.get().clone())?;
-                o.insert(value.clone());
-                Ok(value)
+        match self.variables.get_mut(key) {
+            Some(value) => {
+                *value = f(value.clone())?;
+                Ok(value.clone())
             }
-            Entry::Vacant(_) => Err(VariableNotFound(key.to_string()).make(span).into()),
-        })
+            None => match self.parent {
+                Some(ref parent) => parent.borrow_mut().assign(key, f, span),
+                None => Err(VariableNotFound(key.to_string()).make(span).into()),
+            },
+        }
     }
 }

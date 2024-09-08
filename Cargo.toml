@@ -3,6 +3,7 @@ name = "ruse"
 version = "0.1.0"
 edition = "2021"
 
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -12,3 +13,7 @@ ariadne = { version = "0.4.1", features = ["auto-color"] }
 dashmap = "6.0.1"
 indexmap = "2.5.0"
 #codespan-reporting = "0.11.1"
+
+[profile.release-debug]
+inherits = "release"
+debug = true
