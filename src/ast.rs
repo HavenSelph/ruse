@@ -42,7 +42,16 @@ pub enum CallArg {
 
 #[derive(NamedVariant, Clone)]
 pub enum NodeKind {
+    Break,
+    Continue,
     NoneLiteral,
+    While(Box<Node>, Box<Node>),
+    For(
+        Option<Box<Node>>,
+        Option<Box<Node>>,
+        Option<Box<Node>>,
+        Box<Node>,
+    ),
     Return(Option<Box<Node>>),
     Function {
         name: Option<String>,
@@ -142,6 +151,15 @@ impl<F: std::fmt::Write> std::fmt::Write for Indent<F> {
                 self.f.write_char('\n')?;
                 self.stored_space = self.indent;
             }
+            '\r' => {
+                self.stored_space = 0;
+            }
+            '\t' => {
+                self.indent(2);
+            }
+            '\0' => {
+                self.dedent(2);
+            }
             ' ' => {
                 self.stored_space += 1;
             }
@@ -182,6 +200,33 @@ impl<'a> Display for NodeFormatter<'a> {
         let node = self.node;
         write!(f, "{}", node.kind.variant_name())?;
         match &node.kind {
+            NodeKind::For(init_expr, condition_expr, loop_expr, body) => {
+                writeln!(f, " {{\t\nInitializer {{")?;
+                match init_expr {
+                    Some(expr) => writeln!(f, "{}", self.child(expr))?,
+                    None => writeln!(f, "None")?,
+                }
+                write!(f, "}}\nCondition {{")?;
+                match condition_expr {
+                    Some(expr) => writeln!(f, "{}", self.child(expr))?,
+                    None => writeln!(f, "None")?,
+                }
+                writeln!(f, "}}Loop {{")?;
+                match loop_expr {
+                    Some(expr) => writeln!(f, "{}", self.child(expr))?,
+                    None => writeln!(f, "None")?,
+                }
+                write!(f, "}}\n{}", self.child(body))?;
+                write!(f, "\0\n}}")?;
+            }
+            NodeKind::While(condition, body) => {
+                write!(
+                    f,
+                    " {{\n{}\n{}\n}}",
+                    self.child(condition),
+                    self.child(body)
+                )?;
+            }
             NodeKind::Return(expr) => {
                 if let Some(expr) = expr {
                     write!(f, " {{\n{}\n}}", self.child(expr))?;
@@ -321,6 +366,8 @@ impl<'a> Display for NodeFormatter<'a> {
                 f.dedent(2);
                 write!(f, "}}")?;
             }
+            NodeKind::Break => (),
+            NodeKind::Continue => (),
         }
         write!(f, "[{:?}]", self.node.span)?;
         Ok(())

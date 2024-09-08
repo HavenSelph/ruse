@@ -161,6 +161,7 @@ impl<'contents> Lexer<'contents> {
                         "fn" => TokenKind::Fn,
                         "in" => TokenKind::In,
                         "continue" => TokenKind::Continue,
+                        "while" => TokenKind::While,
                         "break" => TokenKind::Break,
                         "None" => TokenKind::None,
                         "True" | "False" => TokenKind::BooleanLiteral,
@@ -338,6 +339,7 @@ impl<'contents> Lexer<'contents> {
     }
 
     fn lex_integer(&mut self, start: usize, base: Base) -> Result<()> {
+        // todo: roman literal 0rIVVIM
         while let Some(char) = self.current_char {
             match (base, char.to_ascii_lowercase()) {
                 (Base::Binary, '0'..='1')

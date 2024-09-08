@@ -1,4 +1,5 @@
 use crate::ast::{BinaryOp, CallArg, FunctionArg, Node, NodeKind, UnaryOp};
+use crate::dprintln;
 use crate::lexer::{Base, Lexer, LexerIterator};
 use crate::report::{Report, ReportKind, ReportLevel, ReportSender, Result};
 use crate::span::Span;
@@ -9,7 +10,7 @@ use ParserReport::*;
 
 #[derive(NamedVariant)]
 enum ParserReport {
-    SyntaxError,
+    SyntaxError(String),
     InvalidFloat,
     InvalidInteger(Base),
     UnexpectedToken(TokenKind),
@@ -20,6 +21,7 @@ impl Display for ParserReport {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.variant_name())?;
         match self {
+            SyntaxError(msg) => write!(f, "{}", msg)?,
             InvalidInteger(base) => write!(f, ": of base {base:?}")?,
             UnexpectedToken(kind) => write!(f, ": {kind}")?,
             _ => (),
@@ -31,9 +33,8 @@ impl Display for ParserReport {
 impl From<ParserReport> for ReportLevel {
     fn from(value: ParserReport) -> Self {
         match value {
-            InvalidFloat | InvalidInteger(_) | SyntaxError | UnexpectedToken(_) | UnexpectedEOF => {
-                Self::Error
-            }
+            InvalidFloat | InvalidInteger(_) | SyntaxError(_) | UnexpectedToken(_)
+            | UnexpectedEOF => Self::Error,
         }
     }
 }
@@ -230,6 +231,79 @@ impl<'contents> Parser<'contents> {
     fn parse_statement(&mut self) -> Result<Box<Node>> {
         match self.current {
             Token {
+                kind: TokenKind::For,
+                span,
+                ..
+            } => {
+                self.advance();
+                self.consume_one(TokenKind::LeftParen)?;
+                let init_expr = match self.current.kind {
+                    TokenKind::SemiColon => {
+                        self.advance();
+                        None
+                    }
+                    _ => {
+                        let expr = self.parse_statement()?;
+                        self.consume_one(TokenKind::SemiColon)?;
+                        Some(expr)
+                    }
+                };
+                dprintln!("{} {}", init_expr.is_some(), self.current);
+                let condition_expr = match self.current.kind {
+                    TokenKind::SemiColon => {
+                        self.advance();
+                        None
+                    }
+                    _ => {
+                        let expr = self.parse_expression()?;
+                        self.consume_one(TokenKind::SemiColon)?;
+                        Some(expr)
+                    }
+                };
+                let loop_expr = match self.current.kind {
+                    TokenKind::RightParen => None,
+                    _ => Some(self.parse_expression()?),
+                };
+                self.consume_one(TokenKind::RightParen)?;
+                let body = self.consume_one(TokenKind::LeftBrace)?;
+                let body = self.parse_block(body.span, TokenKind::RightBrace)?;
+                let span = span.extend(body.span);
+                Ok(NodeKind::For(init_expr, condition_expr, loop_expr, body)
+                    .make(span)
+                    .into())
+            }
+            Token {
+                kind: TokenKind::Break,
+                span,
+                ..
+            } => {
+                self.advance();
+                self.consume_line()?;
+                Ok(NodeKind::Break.make(span).into())
+            }
+            Token {
+                kind: TokenKind::Continue,
+                span,
+                ..
+            } => {
+                self.advance();
+                self.consume_line()?;
+                Ok(NodeKind::Continue.make(span).into())
+            }
+            Token {
+                kind: TokenKind::While,
+                span,
+                ..
+            } => {
+                self.advance();
+                let condition = self.parse_expression()?;
+                let body = self.consume_one(TokenKind::LeftBrace)?;
+                let body = self.parse_block(body.span, TokenKind::RightBrace)?;
+                self.consume_line()?;
+                let span = span.extend(body.span);
+                Ok(NodeKind::While(condition, body).make(span).into())
+            }
+            Token {
                 kind: TokenKind::Let,
                 span,
                 ..
@@ -238,7 +312,6 @@ impl<'contents> Parser<'contents> {
                 let ident = self.consume_one(TokenKind::Identifier)?.text.to_string();
                 self.consume_one(TokenKind::Equals)?;
                 let expr = self.parse_expression()?;
-                self.consume_line()?;
                 let span = span.extend(expr.span);
                 Ok(NodeKind::VariableDeclaration(ident, expr).make(span).into())
             }
@@ -255,6 +328,7 @@ impl<'contents> Parser<'contents> {
                         (span.extend(expr.span), Some(expr))
                     }
                 };
+                self.consume_line()?;
                 Ok(NodeKind::Return(expr).make(span).into())
             }
             Token {
@@ -738,10 +812,11 @@ impl<'contents> Parser<'contents> {
                     let ident = self.consume_one(TokenKind::Identifier)?;
                     let span = start.extend(ident.span);
                     if pos_v {
-                        return Err(SyntaxError
-                            .make(span)
-                            .with_message("* argument must be the final argument")
-                            .into());
+                        return Err(SyntaxError(
+                            "* argument must be the final argument".to_string(),
+                        )
+                        .make(span)
+                        .into());
                     }
                     pos_v = true;
                     arguments.push(FunctionArg::PositionalVariadic(
@@ -754,10 +829,11 @@ impl<'contents> Parser<'contents> {
                     let ident = self.consume_one(TokenKind::Identifier)?;
                     let span = start.extend(ident.span);
                     if key_v {
-                        return Err(SyntaxError
-                            .make(span)
-                            .with_message("** argument must be the final argument")
-                            .into());
+                        return Err(SyntaxError(
+                            "** argument must be the final argument".to_string(),
+                        )
+                        .make(span)
+                        .into());
                     }
                     key_v = true;
                     arguments.push(FunctionArg::KeywordVariadic(span, ident.text.to_string()));

@@ -87,7 +87,7 @@ impl Scanner {
     }
 }
 
-pub fn get_source(filename: &'static str) -> crate::report::Result<&Source> {
+pub fn get_source(filename: &'static str) -> crate::report::Result<&'static Source> {
     match CACHE.entry(filename) {
         Entry::Occupied(entry) => Ok(entry.get()),
         Entry::Vacant(entry) => {

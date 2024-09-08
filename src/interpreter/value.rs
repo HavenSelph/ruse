@@ -222,9 +222,8 @@ impl Value {
                 while let Some((name, kind)) = arg_map.pop() {
                     match kind {
                         FunctionArg::Positional(a_span) => {
-                            return Err(SyntaxError
+                            return Err(SyntaxError(format!("Missing required argument {name:?}"))
                                 .make(span)
-                                .with_message(format!("Missing required argument {name:?}"))
                                 .with_label(a_span.label().with_color(Color::Blue))
                                 .into());
                         }
@@ -377,7 +376,10 @@ impl Value {
 
     pub fn power(&self, other: &Self, span: Span) -> Result<Self> {
         Ok(match (self, other) {
-            (Self::Integer(lhs), Self::Integer(rhs)) => Self::Integer(lhs.pow(*rhs as u32)),
+            (Self::Integer(lhs), Self::Integer(rhs)) => {
+                Self::Float((*lhs as f64).powi(*rhs as i32))
+            }
+            (Self::Integer(lhs), Self::Float(rhs)) => Self::Float((*lhs as f64).powf(*rhs)),
             (Self::Float(lhs), Self::Float(rhs)) => Self::Float(lhs.powf(*rhs)),
             (Self::Float(lhs), Self::Integer(rhs)) => Self::Float(lhs.powi(*rhs as i32)),
             (lhs, rhs) => {

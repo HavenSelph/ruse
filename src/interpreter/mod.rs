@@ -5,6 +5,7 @@ use crate::span::Span;
 use indexmap::IndexMap;
 use name_variant::NamedVariant;
 use std::cell::RefCell;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::rc::Rc;
@@ -15,18 +16,18 @@ mod value;
 
 #[derive(NamedVariant)]
 enum InterpreterReport {
+    SyntaxError(String),
     VariableNotFound(String),
     VariableAlreadyExists(String),
-    SyntaxError,
 }
 
 impl Display for InterpreterReport {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.variant_name())?;
         match self {
+            SyntaxError(msg) => write!(f, ": {}", msg)?,
             VariableNotFound(string) => write!(f, ": {string}")?,
             VariableAlreadyExists(string) => write!(f, ": {string}")?,
-            SyntaxError => (),
         }
         Ok(())
     }
@@ -35,7 +36,7 @@ impl Display for InterpreterReport {
 impl From<InterpreterReport> for ReportLevel {
     fn from(value: InterpreterReport) -> Self {
         match value {
-            SyntaxError | VariableAlreadyExists(_) | VariableNotFound(_) => Self::Error,
+            SyntaxError(_) | VariableAlreadyExists(_) | VariableNotFound(_) => Self::Error,
         }
     }
 }
@@ -64,34 +65,28 @@ impl Interpreter {
 
     pub fn register_builtins_to_scope(scope: Ref<Scope>) -> Ref<Scope> {
         macro_rules! register_builtins {
-            ($($name:ident: ($data_path:path, $run_path:path)),+$(,)?) => {
+            ($($func_path:path),+$(,)?) => {
                 $(
-                let (span, args) = $data_path();
-                let builtin = Value::Function(ref_it!(value::Function {
-                    span,
-                    name: None,
-                    args,
-                    scope: scope.clone(),
-                    run: FunctionRun::BuiltIn(&$run_path)
-                }));
-                match scope.borrow_mut().declare(stringify!($name), builtin, span) {
-                    _ => (),
-                }
+                let func = $func_path();
+                let name = func.borrow().name.clone().unwrap();
+                scope
+                    .borrow_mut()
+                    .declare(&name, Value::Function(func), Span::empty())
+                    .ok();
                 )+
             };
         }
-        register_builtins!(
-            print:(builtin::print_data,builtin::print_run),
-            debug:(builtin::debug_data,builtin::debug_run),
-        );
+        register_builtins!(builtin::print, builtin::debug);
         scope
     }
 
+    #[allow(unused)]
     pub fn run_and_return_scope(&mut self, node: &Node) -> Result<Ref<Scope>> {
         let scope = Scope::new(None);
         self.run_block(node, scope.clone()).map(|_| scope)
     }
 
+    #[allow(unused)]
     pub fn execute(&mut self, node: &Node) -> Result<Ref<Scope>> {
         let scope = Scope::new(None);
         self.run(node, scope.clone()).map(|_| scope)
@@ -131,6 +126,53 @@ impl Interpreter {
         }
 
         match &node.kind {
+            NodeKind::For(init, cond, loop_expr, body) => {
+                let scope = Scope::new(Some(scope));
+                if let Some(init) = init {
+                    self.run(init, scope.clone())?;
+                }
+                loop {
+                    if let Some(cond) = cond {
+                        if !self.run(cond, scope.clone())?.as_bool() {
+                            break;
+                        }
+                    }
+                    self.run(body, scope.clone())?;
+                    match self.control_flow {
+                        ControlFlow::Break => {
+                            self.control_flow = ControlFlow::None;
+                            break;
+                        }
+                        ControlFlow::Continue => {
+                            self.control_flow = ControlFlow::None;
+                        }
+                        _ => {}
+                    }
+                    if let Some(loop_expr) = loop_expr {
+                        self.run(loop_expr, scope.clone())?;
+                    }
+                }
+                Ok(Value::None)
+            }
+            NodeKind::While(condition, body) => {
+                loop {
+                    if !self.run(condition, scope.clone())?.as_bool() {
+                        break;
+                    }
+                    self.run(body, scope.clone())?;
+                    match self.control_flow {
+                        ControlFlow::Break => {
+                            self.control_flow = ControlFlow::None;
+                            break;
+                        }
+                        ControlFlow::Continue => {
+                            self.control_flow = ControlFlow::None;
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Value::None)
+            }
             NodeKind::Subscript { .. } => todo!("Subscript"),
             NodeKind::ArrayLiteral(stmts) => {
                 let mut vals = Vec::with_capacity(stmts.len());
@@ -166,19 +208,24 @@ impl Interpreter {
             }
             NodeKind::Assignment(key, expr) => {
                 let value = self.run(expr, scope.clone())?;
-                self.handle_assign(key, value, scope.clone(), span)
+                self.simple_assign(key, value, scope.clone(), span)
             }
             NodeKind::CompoundAssignment(op, lhs, rhs) => {
-                let value = match op {
-                    BinaryOp::Add => dispatch_op!(Value::add, lhs, rhs),
-                    BinaryOp::Subtract => dispatch_op!(Value::subtract, lhs, rhs),
-                    BinaryOp::Multiply => dispatch_op!(Value::multiply, lhs, rhs),
-                    BinaryOp::Divide => dispatch_op!(Value::divide, lhs, rhs),
-                    BinaryOp::Modulus => dispatch_op!(Value::modulo, lhs, rhs),
-                    BinaryOp::Power => dispatch_op!(Value::power, lhs, rhs),
-                    _ => unreachable!(),
-                }?;
-                self.handle_assign(lhs, value, scope.clone(), span)
+                let rhs = self.run(rhs, scope.clone())?;
+                self.handle_assign(
+                    lhs,
+                    |lhs: Value| match op {
+                        BinaryOp::Add => lhs.add(&rhs, span),
+                        BinaryOp::Subtract => lhs.subtract(&rhs, span),
+                        BinaryOp::Multiply => lhs.multiply(&rhs, span),
+                        BinaryOp::Divide => lhs.divide(&rhs, span),
+                        BinaryOp::Modulus => lhs.modulo(&rhs, span),
+                        BinaryOp::Power => lhs.power(&rhs, span),
+                        _ => unreachable!(),
+                    },
+                    scope.clone(),
+                    span,
+                )
             }
             NodeKind::NoneLiteral => Ok(Value::None),
             NodeKind::StringLiteral(string) => Ok(Value::String(Rc::new(string.to_string()))),
@@ -248,9 +295,8 @@ impl Interpreter {
             }
             NodeKind::Return(expr) => {
                 if !scope.borrow().in_function {
-                    return Err(SyntaxError
+                    return Err(SyntaxError("Return used outside of function".to_string())
                         .make(span)
-                        .with_message("Return used outside of function")
                         .into());
                 }
                 let value = if let Some(expr) = expr {
@@ -262,6 +308,14 @@ impl Interpreter {
                 Ok(value)
             }
             NodeKind::Call(expr, args) => self.handle_call(expr, args, scope, span),
+            NodeKind::Continue => {
+                self.control_flow = ControlFlow::Continue;
+                Ok(Value::None)
+            }
+            NodeKind::Break => {
+                self.control_flow = ControlFlow::Break;
+                Ok(Value::None)
+            }
         }
     }
 
@@ -288,20 +342,29 @@ impl Interpreter {
         callee.call(self, args, span)
     }
 
-    pub fn handle_assign(
-        &mut self,
+    pub fn handle_assign<F: FnOnce(Value) -> Result<Value>>(
+        &self,
+        key: &Node,
+        f: F,
+        scope: Ref<Scope>,
+        span: Span,
+    ) -> Result<Value> {
+        match &key.kind {
+            NodeKind::VariableAccess(key) => scope.borrow_mut().assign(key, f, span),
+            _ => Err(SyntaxError("Invalid assignment target".to_string())
+                .make(span)
+                .into()),
+        }
+    }
+
+    pub fn simple_assign(
+        &self,
         key: &Node,
         value: Value,
         scope: Ref<Scope>,
         span: Span,
     ) -> Result<Value> {
-        match &key.kind {
-            NodeKind::VariableAccess(key) => scope.borrow_mut().assign(key.as_str(), value, span),
-            _ => Err(SyntaxError
-                .make(span)
-                .with_message("Invalid assignment target")
-                .into()),
-        }
+        self.handle_assign(key, |_| Ok(value), scope, span)
     }
 }
 
@@ -332,6 +395,16 @@ impl Scope {
         })
     }
 
+    fn with_entry<T, F: FnOnce(Entry<String, Value>) -> T>(&mut self, key: &str, f: F) -> T {
+        let entry = self.variables.entry(key.to_string());
+        if let Entry::Vacant(_) = entry {
+            if let Some(ref scope) = self.parent.clone() {
+                return scope.borrow_mut().with_entry(key, f);
+            }
+        }
+        f(entry)
+    }
+
     fn _get(&self, key: &str) -> Option<Value> {
         self.variables
             .get(key)
@@ -358,14 +431,19 @@ impl Scope {
         }
     }
 
-    pub fn assign(&mut self, key: &str, value: Value, span: Span) -> Result<Value> {
-        if self.variables.contains_key(key) {
-            self.variables.insert(key.to_string(), value.clone());
-            Ok(value)
-        } else if let Some(parent) = &self.parent {
-            parent.borrow_mut().assign(key, value, span)
-        } else {
-            Err(VariableNotFound(key.to_string()).make(span).into())
-        }
+    pub fn assign<F: FnOnce(Value) -> Result<Value>>(
+        &mut self,
+        key: &str,
+        f: F,
+        span: Span,
+    ) -> Result<Value> {
+        self.with_entry(key, |entry| match entry {
+            Entry::Occupied(mut o) => {
+                let value = f(o.get().clone())?;
+                o.insert(value.clone());
+                Ok(value)
+            }
+            Entry::Vacant(_) => Err(VariableNotFound(key.to_string()).make(span).into()),
+        })
     }
 }

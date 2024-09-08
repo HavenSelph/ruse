@@ -82,6 +82,7 @@ pub struct Args {
 
 macro_rules! make_getter {
     ($($field:ident: $field_type:ty = ($field_default:expr)),+$(,)?) => {
+        #[allow(dead_code)]
         impl Args {
             pub fn default() -> Self {
                 Self {
