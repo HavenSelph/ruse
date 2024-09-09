@@ -12,6 +12,7 @@ owo-colors = "4.0.0"
 ariadne = { version = "0.4.1", features = ["auto-color"] }
 dashmap = "6.0.1"
 indexmap = "2.5.0"
+rustc-hash = "2.0.0"
 #codespan-reporting = "0.11.1"
 
 [profile.release-debug]

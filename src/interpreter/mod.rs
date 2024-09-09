@@ -4,6 +4,7 @@ use crate::report::{ReportKind, ReportLevel, Result};
 use crate::span::Span;
 use indexmap::IndexMap;
 use name_variant::NamedVariant;
+use rustc_hash::FxBuildHasher;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
@@ -378,7 +379,7 @@ enum ControlFlow {
 
 pub struct Scope {
     parent: Option<Ref<Scope>>,
-    variables: HashMap<String, Value>,
+    variables: HashMap<String, Value, FxBuildHasher>,
     in_function: bool,
 }
 
@@ -389,7 +390,7 @@ impl Scope {
             .map_or(false, |scope| scope.borrow().in_function);
         ref_it!(Self {
             parent,
-            variables: HashMap::new(),
+            variables: HashMap::with_hasher(FxBuildHasher),
             in_function
         })
     }
