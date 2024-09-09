@@ -8,7 +8,7 @@ use name_variant::NamedVariant;
 use rustc_hash::FxBuildHasher;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use TrashReport::*;
 
 #[derive(NamedVariant)]
@@ -38,14 +38,14 @@ impl From<TrashReport> for ReportLevel {
 
 impl ReportKind for TrashReport {}
 
-pub static GC: RwLock<GarbageCollector> = RwLock::new(GarbageCollector::new());
+pub static SC: RwLock<ScopeCollector> = RwLock::new(ScopeCollector::new());
 
-pub struct GarbageCollector {
+pub struct ScopeCollector {
     next: usize,
-    refs: Vec<Ref<Value>>,
+    refs: Vec<Ref<Scope>>,
 }
 
-impl GarbageCollector {
+impl ScopeCollector {
     const fn new() -> Self {
         Self {
             next: 100,
@@ -53,10 +53,10 @@ impl GarbageCollector {
         }
     }
 
-    pub fn monitor(&mut self, value: Value) -> Ref<Value> {
-        let value = ref_it!(value);
-        self.refs.push(value.clone());
-        value
+    pub fn monitor(&mut self, scope: Scope) -> Ref<Scope> {
+        let scope = ref_it!(scope);
+        self.refs.push(scope.clone());
+        scope
     }
 
     pub fn collect(&mut self) {
@@ -78,40 +78,45 @@ impl GarbageCollector {
 
 pub struct Scope {
     parent: Option<Ref<Scope>>,
-    variables: HashMap<String, Ref<Value>, FxBuildHasher>,
+    fallback: Option<Weak<RwLock<Scope>>>,
+    variables: HashMap<String, Value, FxBuildHasher>,
     pub in_function: bool,
 }
 
 impl Scope {
-    pub fn new(parent: Option<Ref<Self>>) -> Ref<Self> {
+    pub fn new(parent: Option<Ref<Self>>, fallback: Option<Weak<RwLock<Self>>>) -> Ref<Self> {
         let in_function = parent
             .clone()
             .map_or(false, |scope| scope.read().unwrap().in_function);
-        ref_it!(Self {
+        SC.write().unwrap().monitor(Self {
             parent,
+            fallback,
             variables: HashMap::with_hasher(FxBuildHasher),
-            in_function
+            in_function,
         })
     }
 
-    fn _get(&self, key: &str) -> Option<Ref<Value>> {
-        match self.variables.get(key) {
-            Some(value) => Some(value.clone()),
-            None => match self.parent {
-                Some(ref parent) => parent.read().unwrap()._get(key),
-                None => None,
-            },
-        }
+    fn try_get(&self, key: &str) -> Option<Value> {
+        self.variables.get(key).cloned().or_else(|| {
+            self.parent
+                .as_ref()
+                .and_then(|p| p.read().unwrap().try_get(key))
+                .or_else(|| {
+                    self.fallback
+                        .as_ref()
+                        .and_then(|fallback| fallback.upgrade()?.read().unwrap().try_get(key))
+                })
+        })
     }
 
-    pub fn get(&self, key: &str, span: Span) -> Result<Ref<Value>> {
-        match self._get(key) {
+    pub fn get(&self, key: &str, span: Span) -> Result<Value> {
+        match self.try_get(key) {
             Some(value) => Ok(value),
             None => Err(VariableNotFound(key.to_string()).make(span).into()),
         }
     }
 
-    pub fn declare(&mut self, key: &str, value: Ref<Value>, span: Span) -> Result<()> {
+    pub fn declare(&mut self, key: &str, value: Value, span: Span) -> Result<()> {
         if self.variables.contains_key(key) {
             Err(VariableAlreadyExists(key.to_string()).make(span).into())
         } else {
@@ -120,15 +125,15 @@ impl Scope {
         }
     }
 
-    pub fn assign<F: FnOnce(Ref<Value>) -> Result<Ref<Value>>>(
+    pub fn assign<F: FnOnce(&Value) -> Result<Value>>(
         &mut self,
         key: &str,
         f: F,
         span: Span,
-    ) -> Result<Ref<Value>> {
+    ) -> Result<Value> {
         match self.variables.get_mut(key) {
             Some(value) => {
-                *value = f(value.clone())?;
+                *value = f(value)?;
                 Ok(value.clone())
             }
             None => match self.parent {

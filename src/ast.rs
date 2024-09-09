@@ -56,15 +56,9 @@ pub enum NodeKind {
     Function {
         name: Option<String>,
         args: Vec<FunctionArg>,
-        captures: Vec<(String, Span)>,
         body: Box<Node>,
     },
-    Subscript {
-        lhs: Box<Node>,
-        start: Option<Box<Node>>,
-        inclusive: bool,
-        stop: Option<Box<Node>>,
-    },
+    Subscript(Box<Node>, Box<Node>),
     ArrayLiteral(Vec<Node>),
     TupleLiteral(Vec<Node>),
     IfStatement(Box<Node>, Box<Node>, Option<Box<Node>>),
@@ -78,6 +72,8 @@ pub enum NodeKind {
     BooleanLiteral(bool),
     BinaryOperation(BinaryOp, Box<Node>, Box<Node>),
     UnaryOperation(UnaryOp, Box<Node>),
+    StarExpression(Box<Node>),
+    StarStarExpression(Box<Node>),
     Block(Vec<Node>),
     Call(Box<Node>, Vec<CallArg>),
 }
@@ -234,25 +230,8 @@ impl<'a> Display for NodeFormatter<'a> {
                 }
             }
             NodeKind::NoneLiteral => (),
-            NodeKind::Subscript {
-                lhs,
-                start,
-                inclusive,
-                stop,
-            } => {
-                writeln!(
-                    f,
-                    "({}) {{\n{},",
-                    inclusive.then(|| "Inclusive").unwrap_or("Exclusive"),
-                    self.child(lhs),
-                )?;
-                if let Some(start) = start {
-                    writeln!(f, "{},", self.child(start))?;
-                }
-                if let Some(stop) = stop {
-                    writeln!(f, "{},", self.child(stop))?;
-                }
-                write!(f, "}}")?;
+            NodeKind::Subscript(lhs, idx) => {
+                write!(f, " {{\n{}\n{}\n}}", self.child(lhs), self.child(idx))?;
             }
             NodeKind::CompoundAssignment(op, lhs, rhs) => {
                 write!(
@@ -320,12 +299,7 @@ impl<'a> Display for NodeFormatter<'a> {
                 }
                 write!(f, "}}")?;
             }
-            NodeKind::Function {
-                name,
-                args,
-                captures,
-                body,
-            } => {
+            NodeKind::Function { name, args, body } => {
                 if let Some(name) = name {
                     write!(f, "({name})")?;
                 } else {
@@ -342,10 +316,6 @@ impl<'a> Display for NodeFormatter<'a> {
                             writeln!(f, "{name}={{\n{}\n}},", self.child(default))?;
                         }
                     }
-                }
-                writeln!(f, "\0)\nCaptures (\t")?;
-                for (capture, _) in captures {
-                    writeln!(f, "{capture}")?;
                 }
                 writeln!(f, "\0)\n\0{}\n}}", self.child(body))?;
             }
@@ -372,6 +342,9 @@ impl<'a> Display for NodeFormatter<'a> {
             }
             NodeKind::Break => (),
             NodeKind::Continue => (),
+            NodeKind::StarStarExpression(expr) | NodeKind::StarExpression(expr) => {
+                write!(f, " {{\n{}\n}}", self.child(expr))?
+            }
         }
         write!(f, "[{:?}]", self.node.span)?;
         Ok(())

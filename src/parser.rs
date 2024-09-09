@@ -339,7 +339,7 @@ impl<'contents> Parser<'contents> {
                 self.advance();
                 let name = self.consume_one(TokenKind::Identifier)?.text.to_string();
                 self.consume_one(TokenKind::LeftParen)?;
-                let (args, captures) = self.parse_signature(TokenKind::RightParen)?;
+                let args = self.parse_signature(TokenKind::RightParen)?;
                 self.consume_one(TokenKind::RightParen)?;
                 let body = self.consume(
                     |t| matches!(t.kind, TokenKind::LeftBrace | TokenKind::FatArrow),
@@ -358,7 +358,6 @@ impl<'contents> Parser<'contents> {
                 Ok(NodeKind::Function {
                     name: Some(name),
                     args,
-                    captures,
                     body,
                 }
                 .make(span)
@@ -415,14 +414,13 @@ impl<'contents> Parser<'contents> {
                 ..
             } => {
                 self.advance();
-                let (args, captures) = self.parse_signature(TokenKind::Pipe)?;
+                let args = self.parse_signature(TokenKind::Pipe)?;
                 self.consume_one(TokenKind::Pipe)?;
                 let body = self.parse_lambda()?;
                 let span = span.extend(body.span);
                 Ok(NodeKind::Function {
                     name: None,
                     args,
-                    captures,
                     body,
                 }
                 .make(span)
@@ -439,7 +437,6 @@ impl<'contents> Parser<'contents> {
                 Ok(NodeKind::Function {
                     name: None,
                     args: Vec::default(),
-                    captures: Vec::default(),
                     body,
                 }
                 .make(span)
@@ -611,6 +608,28 @@ impl<'contents> Parser<'contents> {
     fn parse_prefix(&mut self) -> Result<Box<Node>> {
         match self.current {
             Token {
+                kind: TokenKind::Star,
+                span,
+                ..
+            } => {
+                self.advance();
+                let expr = self.parse_prefix()?;
+                let end = expr.span;
+                Ok(NodeKind::StarExpression(expr).make(span.extend(end)).into())
+            }
+            Token {
+                kind: TokenKind::StarStar,
+                span,
+                ..
+            } => {
+                self.advance();
+                let expr = self.parse_prefix()?;
+                let end = expr.span;
+                Ok(NodeKind::StarStarExpression(expr)
+                    .make(span.extend(end))
+                    .into())
+            }
+            Token {
                 kind: TokenKind::Bang,
                 span,
                 ..
@@ -654,18 +673,10 @@ impl<'contents> Parser<'contents> {
             match self.current.kind {
                 TokenKind::LeftBracket => {
                     self.advance();
-                    let (start, inclusive, stop) =
-                        self.parse_slice_value(TokenKind::RightBracket)?;
+                    let idx = self.parse_expression()?;
                     let end = self.consume_one(TokenKind::RightBracket)?.span;
                     let span = lhs.span.extend(end);
-                    lhs = NodeKind::Subscript {
-                        lhs,
-                        start,
-                        inclusive,
-                        stop,
-                    }
-                    .make(span)
-                    .into()
+                    lhs = NodeKind::Subscript(lhs, idx).make(span).into()
                 }
                 TokenKind::LeftParen => {
                     self.advance();
@@ -800,13 +811,10 @@ impl<'contents> Parser<'contents> {
         }
     }
 
-    fn parse_signature(
-        &mut self,
-        closer: TokenKind,
-    ) -> Result<(Vec<FunctionArg>, Vec<(String, Span)>)> {
+    fn parse_signature(&mut self, closer: TokenKind) -> Result<Vec<FunctionArg>> {
         let mut arguments = Vec::new();
         let (mut pos_v, mut key_v) = (false, false);
-        while self.current.kind != closer && self.current.kind != TokenKind::SemiColon {
+        while self.current.kind != closer {
             if !arguments.is_empty() {
                 self.consume_one(TokenKind::Comma)?;
             }
@@ -864,47 +872,6 @@ impl<'contents> Parser<'contents> {
                 }
             };
         }
-        if self.current.kind == TokenKind::SemiColon {
-            self.advance();
-            Ok((arguments, self.parse_captures(closer)?))
-        } else {
-            Ok((arguments, Vec::default()))
-        }
-    }
-
-    fn parse_slice_value(&mut self, closer: TokenKind) -> Result<SliceValue> {
-        let start = match self.current.kind {
-            kind if kind == closer => return Ok((None, false, None)),
-            TokenKind::PeriodPeriod => None,
-            _ => Some(self.parse_expression()?),
-        };
-        let inclusive = match self.current.kind {
-            kind if kind == closer => return Ok((start, false, None)),
-            _ => {
-                self.consume_one(TokenKind::PeriodPeriod)?;
-                (self.current.kind == TokenKind::Equals)
-                    .then(|| self.advance())
-                    .is_some()
-            }
-        };
-        let end = match self.current.kind {
-            kind if kind == closer => return Ok((start, inclusive, None)),
-            _ => Some(self.parse_expression()?),
-        };
-        Ok((start, inclusive, end))
-    }
-
-    fn parse_captures(&mut self, closer: TokenKind) -> Result<Vec<(String, Span)>> {
-        let mut captures = Vec::new();
-        while self.current.kind != closer {
-            if !captures.is_empty() {
-                self.consume_one(TokenKind::Comma)?;
-            }
-            let ident = self.consume_one(TokenKind::Identifier)?;
-            captures.push((ident.text.to_string(), ident.span));
-        }
-        Ok(captures)
+        Ok(arguments)
     }
 }
-
-type SliceValue = (Option<Box<Node>>, bool, Option<Box<Node>>);

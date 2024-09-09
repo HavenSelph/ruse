@@ -1,4 +1,3 @@
-use crate::interpreter::trash::GC;
 use crate::interpreter::value::{BuiltInFunction, Function, FunctionArg, FunctionRun, Value};
 use crate::interpreter::{Ref, Scope};
 use crate::ref_it;
@@ -19,14 +18,9 @@ macro_rules! get_args {
 
 pub fn print() -> Ref<Function> {
     fn execute(scope: Ref<Scope>, span: Span) -> Result<Value> {
-        let (vals, sep, end) = get_args!(scope, span, vals, sep, end);
-        let Value::Tuple(vals) = vals.read().unwrap().clone() else {
-            unreachable!();
+        let (Value::Tuple(vals), sep, end) = get_args!(scope, span, vals, sep, end) else {
+            unreachable!()
         };
-        let (sep, end) = (
-            sep.read().unwrap().as_string(),
-            end.read().unwrap().as_string(),
-        );
 
         for (i, val) in vals.read().unwrap().iter().enumerate() {
             if i != 0 {
@@ -53,9 +47,8 @@ pub fn print() -> Ref<Function> {
 pub fn debug() -> Ref<Function> {
     fn execute(scope: Ref<Scope>, span: Span) -> Result<Value> {
         let (val,) = get_args!(scope, span, val);
-        let val = val.read().unwrap();
-        println!("[DEBUG {span}] {val}",);
-        Ok(Value::clone(&val))
+        println!("[DEBUG {span}] {val}");
+        Ok(val)
     }
     RuseBuiltIn::new("debug")
         .with_arg(BuiltInFunctionArg::Positional("val"))
@@ -98,10 +91,9 @@ impl RuseBuiltIn {
                 BuiltInFunctionArg::PositionalVariadic(name) => {
                     (name, FunctionArg::PositionalVariadic(span))
                 }
-                BuiltInFunctionArg::Keyword(name, default) => (
-                    name,
-                    FunctionArg::Keyword(span, GC.write().unwrap().monitor(default)),
-                ),
+                BuiltInFunctionArg::Keyword(name, default) => {
+                    (name, FunctionArg::Keyword(span, default))
+                }
                 BuiltInFunctionArg::KeywordVariadic(name) => {
                     (name, FunctionArg::KeywordVariadic(()))
                 }
@@ -112,7 +104,8 @@ impl RuseBuiltIn {
             span,
             name: Some(self.name),
             args,
-            scope: Scope::new(None),
+            scope: Scope::new(None, None),
+            globals: None,
             run,
         })
     }

@@ -1,6 +1,6 @@
 use crate::ast::{BinaryOp, CallArg, FunctionArg, Node, NodeKind, UnaryOp};
 pub use crate::interpreter::trash::Scope;
-use crate::interpreter::trash::GC;
+use crate::interpreter::trash::SC;
 use crate::interpreter::value::{Function, FunctionRun, Value};
 use crate::report::{ReportKind, ReportLevel, Result};
 use crate::span::Span;
@@ -68,7 +68,7 @@ impl Interpreter {
                 scope
                     .write()
                     .unwrap()
-                    .declare(&name, GC.write().unwrap().monitor(Value::Function(func)), Span::empty())
+                    .declare(&name, Value::Function(func), Span::empty())
                     .ok();
                 )+
             };
@@ -79,13 +79,13 @@ impl Interpreter {
 
     #[allow(unused)]
     pub fn run_and_return_scope(&mut self, node: &Node) -> Result<Ref<Scope>> {
-        let scope = Scope::new(None);
+        let scope = Scope::new(None, None);
         self.run_block(node, scope.clone()).map(|_| scope)
     }
 
     #[allow(unused)]
     pub fn execute(&mut self, node: &Node) -> Result<Ref<Scope>> {
-        let scope = Scope::new(None);
+        let scope = Scope::new(None, None);
         self.run(node, scope.clone()).map(|_| scope)
     }
 
@@ -124,7 +124,7 @@ impl Interpreter {
 
         match &node.kind {
             NodeKind::For(init, cond, loop_expr, body) => {
-                let scope = Scope::new(Some(scope.clone()));
+                let scope = Scope::new(Some(scope.clone()), None);
                 if let Some(init) = init {
                     self.run(init, scope.clone())?;
                 }
@@ -170,7 +170,11 @@ impl Interpreter {
                 }
                 Ok(Value::None)
             }
-            NodeKind::Subscript { .. } => todo!("Subscript"),
+            NodeKind::Subscript(lhs, idx) => {
+                let lhs = self.run(lhs, scope.clone())?;
+                let idx = self.run(idx, scope.clone())?;
+                lhs.subscript(&idx, span)
+            }
             NodeKind::ArrayLiteral(stmts) => {
                 let mut vals = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
@@ -197,36 +201,29 @@ impl Interpreter {
             }
             NodeKind::VariableAccess(key) => {
                 let val = scope.read().unwrap().get(key.as_str(), span)?;
-                Ok(Value::clone(&val.clone().read().unwrap()))
+                Ok(val)
             }
-            NodeKind::VariableDeclaration(key, expr) => {
-                let value = self.run(expr, scope.clone())?;
-                scope
-                    .write()
-                    .unwrap()
-                    .declare(key.as_str(), GC.write().unwrap().monitor(value), span)
-                    .map(|_| Value::None)
-            }
+            NodeKind::VariableDeclaration(key, expr) => scope
+                .write()
+                .unwrap()
+                .declare(key.as_str(), self.run(expr, scope.clone())?, span)
+                .map(|_| Value::None),
             NodeKind::Assignment(key, expr) => {
-                let value = self.run(expr, scope.clone())?;
-                self.simple_assign(key, GC.write().unwrap().monitor(value), scope, span)
+                let val = self.run(expr, scope.clone())?;
+                self.simple_assign(key, val, scope, span)
             }
             NodeKind::CompoundAssignment(op, lhs, rhs) => {
                 let rhs = self.run(rhs, scope.clone())?;
                 self.handle_assign(
                     lhs,
-                    |lhs| {
-                        let lhs = lhs.read().unwrap();
-                        let val = match op {
-                            BinaryOp::Add => lhs.add(&rhs, span),
-                            BinaryOp::Subtract => lhs.subtract(&rhs, span),
-                            BinaryOp::Multiply => lhs.multiply(&rhs, span),
-                            BinaryOp::Divide => lhs.divide(&rhs, span),
-                            BinaryOp::Modulus => lhs.modulo(&rhs, span),
-                            BinaryOp::Power => lhs.power(&rhs, span),
-                            _ => unreachable!(),
-                        }?;
-                        Ok(GC.write().unwrap().monitor(val))
+                    |lhs| match op {
+                        BinaryOp::Add => lhs.add(&rhs, span),
+                        BinaryOp::Subtract => lhs.subtract(&rhs, span),
+                        BinaryOp::Multiply => lhs.multiply(&rhs, span),
+                        BinaryOp::Divide => lhs.divide(&rhs, span),
+                        BinaryOp::Modulus => lhs.modulo(&rhs, span),
+                        BinaryOp::Power => lhs.power(&rhs, span),
+                        _ => unreachable!(),
                     },
                     scope.clone(),
                     span,
@@ -260,16 +257,17 @@ impl Interpreter {
                 UnaryOp::Negate => dispatch_op!(Value::negate, expr),
             },
             NodeKind::Block(_) => {
-                let scope = Scope::new(Some(scope));
-                let val = self.run_block(node, scope);
-                GC.write().unwrap().collect();
+                let val = {
+                    let scope = Scope::new(Some(scope), None);
+                    self.run_block(node, scope)
+                };
+                SC.write().unwrap().collect();
                 val
             }
             NodeKind::Function {
                 name,
                 body,
                 args: raw_args,
-                captures,
             } => {
                 let mut args = IndexMap::new();
                 for argument in raw_args.clone() {
@@ -282,40 +280,23 @@ impl Interpreter {
                         }
                         FunctionArg::Keyword(span, name, default) => {
                             let value = self.run(&default, scope.clone())?;
-                            args.insert(
-                                name.clone(),
-                                value::FunctionArg::Keyword(
-                                    span,
-                                    GC.write().unwrap().monitor(value),
-                                ),
-                            );
+                            args.insert(name.clone(), value::FunctionArg::Keyword(span, value));
                         }
                         FunctionArg::KeywordVariadic(_span, name) => {
                             args.insert(name.clone(), value::FunctionArg::KeywordVariadic(()));
                         }
                     }
                 }
-                let function_scope = Scope::new(None);
-                for (capture, span) in captures {
-                    let val = scope.clone().read().unwrap().get(capture, *span)?;
-                    function_scope
-                        .write()
-                        .unwrap()
-                        .declare(capture, val, *span)?;
-                }
                 let function = Value::Function(ref_it!(Function {
                     span,
                     name: name.clone(),
                     args,
-                    scope: function_scope,
+                    scope: Scope::new(None, None),
+                    globals: Some(Arc::downgrade(&scope)),
                     run: FunctionRun::Program(body.clone()),
                 }));
                 if let Some(name) = name {
-                    scope.write().unwrap().declare(
-                        name,
-                        GC.write().unwrap().monitor(function),
-                        span,
-                    )?;
+                    scope.write().unwrap().declare(name, function, span)?;
                     Ok(Value::None)
                 } else {
                     Ok(function)
@@ -344,6 +325,16 @@ impl Interpreter {
                 self.control_flow = ControlFlow::Break;
                 Ok(Value::None)
             }
+            NodeKind::StarExpression(_) => {
+                Err(SyntaxError("Star expression not allowed here".to_string())
+                    .make(span)
+                    .into())
+            }
+            NodeKind::StarStarExpression(_) => Err(SyntaxError(
+                "StarStar expression not allowed here".to_string(),
+            )
+            .make(span)
+            .into()),
         }
     }
 
@@ -356,22 +347,47 @@ impl Interpreter {
     ) -> Result<Value> {
         let callee = self.run(node, scope.clone())?;
         let mut args = Vec::with_capacity(call_args.len());
+        let mut seen_keyword = false;
         for arg in call_args.iter() {
-            let value_arg = match arg {
-                CallArg::Positional(span, node) => {
-                    value::CallArg::Positional(*span, self.run(node, scope.clone())?)
-                }
+            match arg {
+                CallArg::Positional(span, node) => match &node.kind {
+                    NodeKind::StarStarExpression(expr) => {
+                        todo!("StarStar expression not implemented")
+                    }
+                    NodeKind::StarExpression(expr) if !seen_keyword => {
+                        for value in self
+                            .run(expr, scope.clone())?
+                            .unpack(*span)?
+                            .read()
+                            .unwrap()
+                            .iter()
+                        {
+                            args.push(value::CallArg::Positional(*span, value.clone()))
+                        }
+                    }
+                    _ if !seen_keyword => {
+                        args.push(value::CallArg::Positional(
+                            *span,
+                            self.run(node, scope.clone())?,
+                        ));
+                    }
+                    _ => {}
+                },
                 CallArg::Keyword(span, string, node) => {
-                    value::CallArg::Keyword(*span, string.clone(), self.run(node, scope.clone())?)
+                    seen_keyword = true;
+                    args.push(value::CallArg::Keyword(
+                        *span,
+                        string.clone(),
+                        self.run(node, scope.clone())?,
+                    ))
                 }
-            };
-            args.push(value_arg);
+            }
         }
         callee.call(self, args, span)
     }
 
-    pub fn handle_assign<F: FnOnce(Ref<Value>) -> Result<Ref<Value>>>(
-        &self,
+    pub fn handle_assign<F: FnOnce(&Value) -> Result<Value>>(
+        &mut self,
         key: &Node,
         f: F,
         scope: Ref<Scope>,
@@ -380,7 +396,20 @@ impl Interpreter {
         match &key.kind {
             NodeKind::VariableAccess(key) => {
                 let val = scope.write().unwrap().assign(key, f, span)?;
-                Ok(Value::clone(&val.clone().read().unwrap()))
+                Ok(val)
+            }
+            NodeKind::Subscript(lhs, index) => {
+                let lhs = self.run(&lhs, scope.clone())?;
+                let index = self.run(&index, scope.clone())?;
+                lhs.subscript_mut(
+                    &index,
+                    |v| {
+                        let val = f(v)?;
+                        *v = val.clone();
+                        Ok(val)
+                    },
+                    span,
+                )
             }
             _ => Err(SyntaxError("Invalid assignment target".to_string())
                 .make(span)
@@ -389,9 +418,9 @@ impl Interpreter {
     }
 
     pub fn simple_assign(
-        &self,
+        &mut self,
         key: &Node,
-        value: Ref<Value>,
+        value: Value,
         scope: Ref<Scope>,
         span: Span,
     ) -> Result<Value> {

@@ -1,4 +1,3 @@
-use crate::interpreter::trash::GC;
 use crate::interpreter::value::ValueReport::*;
 use crate::interpreter::InterpreterReport::SyntaxError;
 use crate::interpreter::{ControlFlow, Interpreter, Ref, Scope};
@@ -10,8 +9,8 @@ use indexmap::IndexMap;
 use name_variant::NamedVariant;
 use std::cmp::Ordering;
 use std::fmt::Formatter;
-use std::ops::Neg;
-use std::sync::Arc;
+use std::ops::{IndexMut, Neg};
+use std::sync::{Arc, RwLock, Weak};
 
 #[derive(NamedVariant)]
 enum ValueReport {
@@ -45,7 +44,7 @@ pub enum FunctionRun {
 pub enum FunctionArg {
     Positional(Span),
     PositionalVariadic(Span),
-    Keyword(Span, Ref<Value>),
+    Keyword(Span, Value),
     KeywordVariadic(()),
 }
 
@@ -54,6 +53,7 @@ pub struct Function {
     pub name: Option<String>,
     pub args: IndexMap<String, FunctionArg>,
     pub scope: Ref<Scope>,
+    pub globals: Option<Weak<RwLock<Scope>>>,
     pub run: FunctionRun,
 }
 
@@ -162,31 +162,68 @@ impl std::fmt::Display for Value {
 }
 
 impl Value {
+    pub fn subscript_mut<F: FnOnce(&mut Self) -> Result<Self>>(
+        &self,
+        slice: &Self,
+        f: F,
+        span: Span,
+    ) -> Result<Self> {
+        match (self, slice) {
+            (Value::Array(vals) | Value::Tuple(vals), Value::Integer(idx)) => {
+                if *idx as usize >= vals.read().unwrap().len() {
+                    Err(ValueError
+                        .make(span)
+                        .with_message(format!(
+                            "Index {idx} out of bounds on {}",
+                            self.variant_name()
+                        ))
+                        .into())
+                } else {
+                    f(vals.write().unwrap().index_mut(*idx as usize))
+                }
+            }
+            _ => Err(ValueError
+                .make(span)
+                .with_message(format!("Invalid slice for type {}", self.variant_name(),))
+                .into()),
+        }
+    }
+
+    pub fn subscript(&self, slice: &Self, span: Span) -> Result<Self> {
+        self.subscript_mut(slice, |value| Ok(value.clone()), span)
+    }
+
+    pub fn unpack(&self, span: Span) -> Result<Ref<Vec<Self>>> {
+        match self {
+            Value::Array(vals) | Value::Tuple(vals) => Ok(vals.clone()),
+            _ => Err(ValueError
+                .make(span)
+                .with_message(format!("{} cannot be unpacked", self.variant_name()))
+                .into()),
+        }
+    }
+
     pub fn call(
         &self,
         interpreter: &mut Interpreter,
         call_args: Vec<CallArg>,
         span: Span,
-    ) -> Result<Value> {
+    ) -> Result<Self> {
         match self {
             Value::Function(function) => {
                 let function = function.read().unwrap();
-                let scope = Scope::new(Some(function.scope.clone()));
+                let scope = Scope::new(Some(function.scope.clone()), function.globals.clone());
                 let mut call_args = call_args.iter().peekable();
                 let mut arg_map: IndexMap<&String, &FunctionArg> =
                     IndexMap::from_iter(function.args.iter().rev());
-                '_lock_scope: {
+                {
                     let mut scope = scope.write().unwrap();
                     scope.in_function = true;
                     while let Some(CallArg::Positional(span, val)) = call_args.peek() {
                         call_args.next();
                         match arg_map.pop() {
                             Some((name, FunctionArg::Positional(_))) => {
-                                scope.declare(
-                                    name,
-                                    GC.write().unwrap().monitor(val.clone()),
-                                    *span,
-                                )?;
+                                scope.declare(name, val.clone(), *span)?;
                             }
                             Some((name, FunctionArg::PositionalVariadic(_))) => {
                                 let mut values = vec![val.clone()];
@@ -194,18 +231,10 @@ impl Value {
                                     call_args.next();
                                     values.push(val.clone());
                                 }
-                                scope.declare(
-                                    name,
-                                    GC.write().unwrap().monitor(Value::Tuple(ref_it!(values))),
-                                    *span,
-                                )?;
+                                scope.declare(name, Value::Tuple(ref_it!(values)), *span)?;
                             }
                             Some((name, FunctionArg::Keyword(..))) => {
-                                scope.declare(
-                                    name,
-                                    GC.write().unwrap().monitor(val.clone()),
-                                    *span,
-                                )?;
+                                scope.declare(name, val.clone(), *span)?;
                             }
                             _ => return Err(UnexpectedArgument.make(*span).into()),
                         }
@@ -223,18 +252,10 @@ impl Value {
                         }
                         match arg_map.shift_remove_entry(name) {
                             Some((_, FunctionArg::Positional(_))) => {
-                                scope.declare(
-                                    name,
-                                    GC.write().unwrap().monitor(val.clone()),
-                                    *span,
-                                )?;
+                                scope.declare(name, val.clone(), *span)?;
                             }
                             Some((_, FunctionArg::Keyword(..))) => {
-                                scope.declare(
-                                    name,
-                                    GC.write().unwrap().monitor(val.clone()),
-                                    *span,
-                                )?;
+                                scope.declare(name, val.clone(), *span)?;
                             }
                             _ => return Err(UnexpectedArgument.make(*span).into()),
                         }
@@ -252,11 +273,7 @@ impl Value {
                             }
                             FunctionArg::PositionalVariadic(a_span) => {
                                 let default = Value::Tuple(ref_it!(Vec::new()));
-                                scope.declare(
-                                    name,
-                                    GC.write().unwrap().monitor(default),
-                                    *a_span,
-                                )?;
+                                scope.declare(name, default, *a_span)?;
                             }
                             FunctionArg::Keyword(a_span, default) => {
                                 scope.declare(name, default.clone(), *a_span)?;
@@ -281,14 +298,6 @@ impl Value {
                 .with_message(format!("Cannot call type {}", self.variant_name()))
                 .into()),
         }
-    }
-
-    pub fn string_repr(&self) -> Self {
-        Value::String(Arc::from(self.as_string_repr()))
-    }
-
-    pub fn string(&self) -> Self {
-        Value::String(Arc::from(self.as_string()))
     }
 
     pub fn add(&self, other: &Self, span: Span) -> Result<Self> {
@@ -536,13 +545,5 @@ impl Value {
             Value::Function { .. } => true,
             Value::None => false,
         }
-    }
-
-    pub fn as_string(&self) -> String {
-        format!("{self}")
-    }
-
-    pub fn as_string_repr(&self) -> String {
-        format!("{self:?}")
     }
 }
