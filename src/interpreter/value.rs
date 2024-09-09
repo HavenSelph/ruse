@@ -1,3 +1,4 @@
+use crate::interpreter::trash::GC;
 use crate::interpreter::value::ValueReport::*;
 use crate::interpreter::InterpreterReport::SyntaxError;
 use crate::interpreter::{ControlFlow, Interpreter, Ref, Scope};
@@ -10,7 +11,7 @@ use name_variant::NamedVariant;
 use std::cmp::Ordering;
 use std::fmt::Formatter;
 use std::ops::Neg;
-use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(NamedVariant)]
 enum ValueReport {
@@ -34,17 +35,17 @@ impl From<ValueReport> for ReportLevel {
 }
 
 impl ReportKind for ValueReport {}
-
+pub type BuiltInFunction = Box<dyn Fn(Ref<Scope>, Span) -> Result<Value> + Send + Sync>;
 #[allow(dead_code)]
 pub enum FunctionRun {
     Program(Box<crate::ast::Node>),
-    BuiltIn(&'static dyn Fn(Ref<Scope>, Span) -> Result<Value>),
+    BuiltIn(BuiltInFunction),
 }
 
 pub enum FunctionArg {
     Positional(Span),
     PositionalVariadic(Span),
-    Keyword(Span, Value),
+    Keyword(Span, Ref<Value>),
     KeywordVariadic(()),
 }
 
@@ -68,7 +69,7 @@ pub enum Value {
     Integer(isize),
     Float(f64),
     Boolean(bool),
-    String(Rc<String>),
+    String(Arc<str>),
     Array(Ref<Vec<Value>>),
     Tuple(Ref<Vec<Value>>),
     None,
@@ -80,7 +81,7 @@ impl std::fmt::Debug for Value {
         match self {
             Value::Array(vals) => {
                 write!(f, "[")?;
-                for (i, val) in vals.borrow().iter().enumerate() {
+                for (i, val) in vals.read().unwrap().iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -90,7 +91,7 @@ impl std::fmt::Debug for Value {
             }
             Value::Tuple(vals) => {
                 write!(f, "(")?;
-                for (i, val) in vals.borrow().iter().enumerate() {
+                for (i, val) in vals.read().unwrap().iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -104,7 +105,7 @@ impl std::fmt::Debug for Value {
             Value::String(val) => write!(f, "{val:?}")?,
             Value::None => write!(f, "None")?,
             Value::Function(function) => {
-                let function = function.borrow();
+                let function = function.read().unwrap();
                 let kind = match function.run {
                     FunctionRun::BuiltIn(_) => "BuiltIn-Function",
                     FunctionRun::Program(..) => "Function",
@@ -131,7 +132,7 @@ impl std::fmt::Display for Value {
         match self {
             Value::Array(vals) => {
                 write!(f, "[")?;
-                for (i, val) in vals.borrow().iter().enumerate() {
+                for (i, val) in vals.read().unwrap().iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -141,7 +142,7 @@ impl std::fmt::Display for Value {
             }
             Value::Tuple(vals) => {
                 write!(f, "(")?;
-                for (i, val) in vals.borrow().iter().enumerate() {
+                for (i, val) in vals.read().unwrap().iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -169,76 +170,101 @@ impl Value {
     ) -> Result<Value> {
         match self {
             Value::Function(function) => {
-                let function = function.borrow();
+                let function = function.read().unwrap();
                 let scope = Scope::new(Some(function.scope.clone()));
                 let mut call_args = call_args.iter().peekable();
                 let mut arg_map: IndexMap<&String, &FunctionArg> =
                     IndexMap::from_iter(function.args.iter().rev());
-
-                while let Some(CallArg::Positional(span, val)) = call_args.peek() {
-                    call_args.next();
-                    match arg_map.pop() {
-                        Some((name, FunctionArg::Positional(_))) => {
-                            scope.borrow_mut().declare(name, val.clone(), *span)?;
-                        }
-                        Some((name, FunctionArg::PositionalVariadic(_))) => {
-                            let mut values = vec![val.clone()];
-                            while let Some(CallArg::Positional(_, val)) = call_args.peek() {
-                                call_args.next();
-                                values.push(val.clone());
+                '_lock_scope: {
+                    let mut scope = scope.write().unwrap();
+                    scope.in_function = true;
+                    while let Some(CallArg::Positional(span, val)) = call_args.peek() {
+                        call_args.next();
+                        match arg_map.pop() {
+                            Some((name, FunctionArg::Positional(_))) => {
+                                scope.declare(
+                                    name,
+                                    GC.write().unwrap().monitor(val.clone()),
+                                    *span,
+                                )?;
                             }
-                            scope.borrow_mut().declare(
-                                name,
-                                Value::Tuple(ref_it!(values)),
-                                *span,
-                            )?;
+                            Some((name, FunctionArg::PositionalVariadic(_))) => {
+                                let mut values = vec![val.clone()];
+                                while let Some(CallArg::Positional(_, val)) = call_args.peek() {
+                                    call_args.next();
+                                    values.push(val.clone());
+                                }
+                                scope.declare(
+                                    name,
+                                    GC.write().unwrap().monitor(Value::Tuple(ref_it!(values))),
+                                    *span,
+                                )?;
+                            }
+                            Some((name, FunctionArg::Keyword(..))) => {
+                                scope.declare(
+                                    name,
+                                    GC.write().unwrap().monitor(val.clone()),
+                                    *span,
+                                )?;
+                            }
+                            _ => return Err(UnexpectedArgument.make(*span).into()),
                         }
-                        Some((name, FunctionArg::Keyword(..))) => {
-                            scope.borrow_mut().declare(name, val.clone(), *span)?;
-                        }
-                        _ => return Err(UnexpectedArgument.make(*span).into()),
                     }
-                }
 
-                while let Some(CallArg::Keyword(span, name, val)) = call_args.peek() {
-                    call_args.next();
-                    if let Some(CallArg::Positional(span, ..)) = call_args.peek() {
-                        return Err(UnexpectedArgument
-                            .make(*span)
-                            .with_message("Positional arguments must not follow keyword arguments")
-                            .into());
-                    }
-                    match arg_map.shift_remove_entry(name) {
-                        Some((_, FunctionArg::Positional(_))) => {
-                            scope.borrow_mut().declare(name, val.clone(), *span)?;
+                    while let Some(CallArg::Keyword(span, name, val)) = call_args.peek() {
+                        call_args.next();
+                        if let Some(CallArg::Positional(span, ..)) = call_args.peek() {
+                            return Err(UnexpectedArgument
+                                .make(*span)
+                                .with_message(
+                                    "Positional arguments must not follow keyword arguments",
+                                )
+                                .into());
                         }
-                        Some((_, FunctionArg::Keyword(..))) => {
-                            scope.borrow_mut().declare(name, val.clone(), *span)?;
+                        match arg_map.shift_remove_entry(name) {
+                            Some((_, FunctionArg::Positional(_))) => {
+                                scope.declare(
+                                    name,
+                                    GC.write().unwrap().monitor(val.clone()),
+                                    *span,
+                                )?;
+                            }
+                            Some((_, FunctionArg::Keyword(..))) => {
+                                scope.declare(
+                                    name,
+                                    GC.write().unwrap().monitor(val.clone()),
+                                    *span,
+                                )?;
+                            }
+                            _ => return Err(UnexpectedArgument.make(*span).into()),
                         }
-                        _ => return Err(UnexpectedArgument.make(*span).into()),
                     }
-                }
 
-                while let Some((name, kind)) = arg_map.pop() {
-                    match kind {
-                        FunctionArg::Positional(a_span) => {
-                            return Err(SyntaxError(format!("Missing required argument {name:?}"))
+                    while let Some((name, kind)) = arg_map.pop() {
+                        match kind {
+                            FunctionArg::Positional(a_span) => {
+                                return Err(SyntaxError(format!(
+                                    "Missing required argument {name:?}"
+                                ))
                                 .make(span)
                                 .with_label(a_span.label().with_color(Color::Blue))
                                 .into());
+                            }
+                            FunctionArg::PositionalVariadic(a_span) => {
+                                let default = Value::Tuple(ref_it!(Vec::new()));
+                                scope.declare(
+                                    name,
+                                    GC.write().unwrap().monitor(default),
+                                    *a_span,
+                                )?;
+                            }
+                            FunctionArg::Keyword(a_span, default) => {
+                                scope.declare(name, default.clone(), *a_span)?;
+                            }
+                            _ => (),
                         }
-                        FunctionArg::PositionalVariadic(a_span) => {
-                            let default = Value::Tuple(ref_it!(Vec::new()));
-                            scope.borrow_mut().declare(name, default, *a_span)?;
-                        }
-                        FunctionArg::Keyword(a_span, default) => {
-                            scope.borrow_mut().declare(name, default.clone(), *a_span)?;
-                        }
-                        _ => (),
                     }
                 }
-
-                scope.borrow_mut().in_function = true;
                 match &function.run {
                     FunctionRun::Program(node) => {
                         let val = interpreter.run(node, scope)?;
@@ -258,21 +284,22 @@ impl Value {
     }
 
     pub fn string_repr(&self) -> Self {
-        Value::String(Rc::new(self.as_string_repr()))
+        Value::String(Arc::from(self.as_string_repr()))
     }
 
     pub fn string(&self) -> Self {
-        Value::String(Rc::new(self.as_string()))
+        Value::String(Arc::from(self.as_string()))
     }
 
     pub fn add(&self, other: &Self, span: Span) -> Result<Self> {
-        Ok(match (self, other) {
+        Ok(match (&self, &other) {
             (Value::Array(lhs), Value::Array(rhs)) => Value::Array(ref_it!(lhs
-                .borrow()
+                .read()
+                .unwrap()
                 .iter()
-                .chain(rhs.borrow().iter())
+                .chain(rhs.read().unwrap().iter())
                 .fold(
-                    Vec::with_capacity(lhs.borrow().len() + rhs.borrow().len()),
+                    Vec::with_capacity(lhs.read().unwrap().len() + rhs.read().unwrap().len()),
                     |mut vec, val| {
                         vec.push(val.clone());
                         vec
@@ -283,7 +310,7 @@ impl Value {
             (Value::Float(lhs), Value::Integer(rhs)) => Value::Float(lhs + *rhs as f64),
             (Value::Float(lhs), Value::Float(rhs)) => Value::Float(lhs + rhs),
             (Value::String(lhs), Value::String(rhs)) => {
-                Value::String(Rc::new([lhs.as_str(), rhs.as_str()].concat()))
+                Value::String(Arc::from([lhs.clone(), rhs.clone()].concat()))
             }
             (lhs, rhs) => {
                 return Err(ValueError
@@ -299,11 +326,11 @@ impl Value {
     }
 
     pub fn subtract(&self, other: &Self, span: Span) -> Result<Self> {
-        Ok(match (self, other) {
-            (Self::Integer(lhs), Self::Integer(rhs)) => Self::Integer(lhs - rhs),
-            (Self::Integer(lhs), Self::Float(rhs)) => Self::Float(*lhs as f64 - rhs),
-            (Self::Float(lhs), Self::Float(rhs)) => Self::Float(lhs - rhs),
-            (Self::Float(lhs), Self::Integer(rhs)) => Self::Float(lhs - *rhs as f64),
+        Ok(match (&self, &other) {
+            (Value::Integer(lhs), Value::Integer(rhs)) => Value::Integer(lhs - rhs),
+            (Value::Integer(lhs), Value::Float(rhs)) => Value::Float(*lhs as f64 - rhs),
+            (Value::Float(lhs), Value::Float(rhs)) => Value::Float(lhs - rhs),
+            (Value::Float(lhs), Value::Integer(rhs)) => Value::Float(lhs - *rhs as f64),
             (lhs, rhs) => {
                 return Err(ValueError
                     .make(span)
@@ -318,11 +345,11 @@ impl Value {
     }
 
     pub fn multiply(&self, other: &Self, span: Span) -> Result<Self> {
-        Ok(match (self, other) {
-            (Self::Integer(lhs), Self::Integer(rhs)) => Self::Integer(lhs * rhs),
-            (Self::Integer(lhs), Self::Float(rhs)) => Self::Float(*lhs as f64 * rhs),
-            (Self::Float(lhs), Self::Float(rhs)) => Self::Float(lhs * rhs),
-            (Self::Float(lhs), Self::Integer(rhs)) => Self::Float(lhs * (*rhs as f64)),
+        Ok(match (&self, &other) {
+            (Value::Integer(lhs), Value::Integer(rhs)) => Value::Integer(lhs * rhs),
+            (Value::Integer(lhs), Value::Float(rhs)) => Value::Float(*lhs as f64 * rhs),
+            (Value::Float(lhs), Value::Float(rhs)) => Value::Float(lhs * rhs),
+            (Value::Float(lhs), Value::Integer(rhs)) => Value::Float(lhs * (*rhs as f64)),
             (lhs, rhs) => {
                 return Err(ValueError
                     .make(span)
@@ -337,11 +364,11 @@ impl Value {
     }
 
     pub fn divide(&self, other: &Self, span: Span) -> Result<Self> {
-        Ok(match (self, other) {
-            (Self::Integer(lhs), Self::Integer(rhs)) => Self::Float(*lhs as f64 / *rhs as f64),
-            (Self::Integer(lhs), Self::Float(rhs)) => Self::Float(*lhs as f64 / *rhs),
-            (Self::Float(lhs), Self::Float(rhs)) => Self::Float(lhs / rhs),
-            (Self::Float(lhs), Self::Integer(rhs)) => Self::Float(*lhs / *rhs as f64),
+        Ok(match (&self, &other) {
+            (Value::Integer(lhs), Value::Integer(rhs)) => Value::Float(*lhs as f64 / *rhs as f64),
+            (Value::Integer(lhs), Value::Float(rhs)) => Value::Float(*lhs as f64 / *rhs),
+            (Value::Float(lhs), Value::Float(rhs)) => Value::Float(lhs / rhs),
+            (Value::Float(lhs), Value::Integer(rhs)) => Value::Float(*lhs / *rhs as f64),
             (lhs, rhs) => {
                 return Err(ValueError
                     .make(span)
@@ -356,11 +383,11 @@ impl Value {
     }
 
     pub fn modulo(&self, other: &Self, span: Span) -> Result<Self> {
-        Ok(match (self, other) {
-            (Self::Integer(lhs), Self::Integer(rhs)) => Self::Integer(lhs % rhs),
-            (Self::Integer(lhs), Self::Float(rhs)) => Self::Float(*lhs as f64 % rhs),
-            (Self::Float(lhs), Self::Float(rhs)) => Self::Float(lhs % rhs),
-            (Self::Float(lhs), Self::Integer(rhs)) => Self::Float(lhs % (*rhs as f64)),
+        Ok(match (&self, &other) {
+            (Value::Integer(lhs), Value::Integer(rhs)) => Value::Integer(lhs % rhs),
+            (Value::Integer(lhs), Value::Float(rhs)) => Value::Float(*lhs as f64 % rhs),
+            (Value::Float(lhs), Value::Float(rhs)) => Value::Float(lhs % rhs),
+            (Value::Float(lhs), Value::Integer(rhs)) => Value::Float(lhs % (*rhs as f64)),
             (lhs, rhs) => {
                 return Err(ValueError
                     .make(span)
@@ -375,13 +402,13 @@ impl Value {
     }
 
     pub fn power(&self, other: &Self, span: Span) -> Result<Self> {
-        Ok(match (self, other) {
-            (Self::Integer(lhs), Self::Integer(rhs)) => {
-                Self::Float((*lhs as f64).powi(*rhs as i32))
+        Ok(match (&self, &other) {
+            (Value::Integer(lhs), Value::Integer(rhs)) => {
+                Value::Float((*lhs as f64).powi(*rhs as i32))
             }
-            (Self::Integer(lhs), Self::Float(rhs)) => Self::Float((*lhs as f64).powf(*rhs)),
-            (Self::Float(lhs), Self::Float(rhs)) => Self::Float(lhs.powf(*rhs)),
-            (Self::Float(lhs), Self::Integer(rhs)) => Self::Float(lhs.powi(*rhs as i32)),
+            (Value::Integer(lhs), Value::Float(rhs)) => Value::Float((*lhs as f64).powf(*rhs)),
+            (Value::Float(lhs), Value::Float(rhs)) => Value::Float(lhs.powf(*rhs)),
+            (Value::Float(lhs), Value::Integer(rhs)) => Value::Float(lhs.powi(*rhs as i32)),
             (lhs, rhs) => {
                 return Err(ValueError
                     .make(span)
@@ -470,14 +497,14 @@ impl Value {
     }
 
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
+        match (&self, &other) {
             (Value::Integer(lhs), Value::Integer(rhs)) => lhs.eq(rhs),
             (Value::Integer(lhs), Value::Float(rhs)) => (*lhs as f64).eq(rhs),
             (Value::Float(lhs), Value::Float(rhs)) => lhs.eq(rhs),
             (Value::Float(lhs), Value::Integer(rhs)) => lhs.eq(&(*rhs as f64)),
             (Value::String(lhs), Value::String(rhs)) => lhs.eq(rhs),
             (Value::Array(lhs), Value::Array(rhs)) | (Value::Tuple(lhs), Value::Tuple(rhs)) => {
-                let (left, right) = (lhs.borrow(), rhs.borrow());
+                let (left, right) = (lhs.read().unwrap(), rhs.read().unwrap());
                 if left.len() != right.len() {
                     false
                 } else {
@@ -489,10 +516,10 @@ impl Value {
     }
 
     fn cmp(&self, other: &Self) -> Option<Ordering> {
-        match (self, other) {
+        match (&self, &other) {
             (Value::Integer(lhs), Value::Integer(rhs)) => Some(lhs.cmp(rhs)),
             (Value::Integer(lhs), Value::Float(rhs)) => (*lhs as f64).partial_cmp(rhs),
-            (Value::Float(lhs), Value::Float(rhs)) => (lhs).partial_cmp(rhs),
+            (Value::Float(lhs), Value::Float(rhs)) => lhs.partial_cmp(rhs),
             (Value::Float(lhs), Value::Integer(rhs)) => (lhs).partial_cmp(&(*rhs as f64)),
             (_, _) => None,
         }
@@ -500,8 +527,8 @@ impl Value {
 
     pub fn as_bool(&self) -> bool {
         match self {
-            Value::Tuple(vals) => !vals.borrow().is_empty(),
-            Value::Array(vals) => !vals.borrow().is_empty(),
+            Value::Tuple(vals) => !vals.read().unwrap().is_empty(),
+            Value::Array(vals) => !vals.read().unwrap().is_empty(),
             Value::Boolean(val) => *val,
             Value::Integer(val) => *val != 0,
             Value::Float(val) => *val != 0f64,

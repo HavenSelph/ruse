@@ -1,5 +1,6 @@
 #![allow(clippy::upper_case_acronyms)]
 #![warn(clippy::complexity)]
+
 use crate::args::ARGS;
 use crate::interpreter::{Interpreter, Scope};
 use crate::parser::Parser;

@@ -339,7 +339,7 @@ impl<'contents> Parser<'contents> {
                 self.advance();
                 let name = self.consume_one(TokenKind::Identifier)?.text.to_string();
                 self.consume_one(TokenKind::LeftParen)?;
-                let args = self.parse_arguments(TokenKind::RightParen)?;
+                let (args, captures) = self.parse_signature(TokenKind::RightParen)?;
                 self.consume_one(TokenKind::RightParen)?;
                 let body = self.consume(
                     |t| matches!(t.kind, TokenKind::LeftBrace | TokenKind::FatArrow),
@@ -358,6 +358,7 @@ impl<'contents> Parser<'contents> {
                 Ok(NodeKind::Function {
                     name: Some(name),
                     args,
+                    captures,
                     body,
                 }
                 .make(span)
@@ -414,13 +415,14 @@ impl<'contents> Parser<'contents> {
                 ..
             } => {
                 self.advance();
-                let args = self.parse_arguments(TokenKind::Pipe)?;
+                let (args, captures) = self.parse_signature(TokenKind::Pipe)?;
                 self.consume_one(TokenKind::Pipe)?;
                 let body = self.parse_lambda()?;
                 let span = span.extend(body.span);
                 Ok(NodeKind::Function {
                     name: None,
                     args,
+                    captures,
                     body,
                 }
                 .make(span)
@@ -432,12 +434,12 @@ impl<'contents> Parser<'contents> {
                 ..
             } => {
                 self.advance();
-                let args = Vec::default();
                 let body = self.parse_lambda()?;
                 let span = span.extend(body.span);
                 Ok(NodeKind::Function {
                     name: None,
-                    args,
+                    args: Vec::default(),
+                    captures: Vec::default(),
                     body,
                 }
                 .make(span)
@@ -798,10 +800,13 @@ impl<'contents> Parser<'contents> {
         }
     }
 
-    fn parse_arguments(&mut self, closer: TokenKind) -> Result<Vec<FunctionArg>> {
+    fn parse_signature(
+        &mut self,
+        closer: TokenKind,
+    ) -> Result<(Vec<FunctionArg>, Vec<(String, Span)>)> {
         let mut arguments = Vec::new();
         let (mut pos_v, mut key_v) = (false, false);
-        while self.current.kind != closer {
+        while self.current.kind != closer && self.current.kind != TokenKind::SemiColon {
             if !arguments.is_empty() {
                 self.consume_one(TokenKind::Comma)?;
             }
@@ -859,7 +864,12 @@ impl<'contents> Parser<'contents> {
                 }
             };
         }
-        Ok(arguments)
+        if self.current.kind == TokenKind::SemiColon {
+            self.advance();
+            Ok((arguments, self.parse_captures(closer)?))
+        } else {
+            Ok((arguments, Vec::default()))
+        }
     }
 
     fn parse_slice_value(&mut self, closer: TokenKind) -> Result<SliceValue> {
@@ -882,6 +892,18 @@ impl<'contents> Parser<'contents> {
             _ => Some(self.parse_expression()?),
         };
         Ok((start, inclusive, end))
+    }
+
+    fn parse_captures(&mut self, closer: TokenKind) -> Result<Vec<(String, Span)>> {
+        let mut captures = Vec::new();
+        while self.current.kind != closer {
+            if !captures.is_empty() {
+                self.consume_one(TokenKind::Comma)?;
+            }
+            let ident = self.consume_one(TokenKind::Identifier)?;
+            captures.push((ident.text.to_string(), ident.span));
+        }
+        Ok(captures)
     }
 }
 

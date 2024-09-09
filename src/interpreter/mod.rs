@@ -1,24 +1,22 @@
 use crate::ast::{BinaryOp, CallArg, FunctionArg, Node, NodeKind, UnaryOp};
+pub use crate::interpreter::trash::Scope;
+use crate::interpreter::trash::GC;
 use crate::interpreter::value::{Function, FunctionRun, Value};
 use crate::report::{ReportKind, ReportLevel, Result};
 use crate::span::Span;
 use indexmap::IndexMap;
 use name_variant::NamedVariant;
-use rustc_hash::FxBuildHasher;
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-use std::rc::Rc;
+use std::sync::{Arc, RwLock};
 use InterpreterReport::*;
 
 mod builtin;
+mod trash;
 mod value;
 
 #[derive(NamedVariant)]
 enum InterpreterReport {
     SyntaxError(String),
-    VariableNotFound(String),
-    VariableAlreadyExists(String),
 }
 
 impl Display for InterpreterReport {
@@ -26,8 +24,6 @@ impl Display for InterpreterReport {
         write!(f, "{}", self.variant_name())?;
         match self {
             SyntaxError(msg) => write!(f, ": {}", msg)?,
-            VariableNotFound(string) => write!(f, ": {string}")?,
-            VariableAlreadyExists(string) => write!(f, ": {string}")?,
         }
         Ok(())
     }
@@ -36,19 +32,19 @@ impl Display for InterpreterReport {
 impl From<InterpreterReport> for ReportLevel {
     fn from(value: InterpreterReport) -> Self {
         match value {
-            SyntaxError(_) | VariableAlreadyExists(_) | VariableNotFound(_) => Self::Error,
+            SyntaxError(_) => Self::Error,
         }
     }
 }
 
 impl ReportKind for InterpreterReport {}
 
-type Ref<T> = Rc<RefCell<T>>;
+type Ref<T> = Arc<RwLock<T>>;
 
 #[macro_export]
 macro_rules! ref_it {
     ($val:expr) => {
-        std::rc::Rc::new(std::cell::RefCell::new($val))
+        std::sync::Arc::new(std::sync::RwLock::new($val))
     };
 }
 
@@ -68,10 +64,11 @@ impl Interpreter {
             ($($func_path:path),+$(,)?) => {
                 $(
                 let func = $func_path();
-                let name = func.borrow().name.clone().unwrap();
+                let name = func.read().unwrap().name.clone().unwrap();
                 scope
-                    .borrow_mut()
-                    .declare(&name, Value::Function(func), Span::empty())
+                    .write()
+                    .unwrap()
+                    .declare(&name, GC.write().unwrap().monitor(Value::Function(func)), Span::empty())
                     .ok();
                 )+
             };
@@ -198,37 +195,45 @@ impl Interpreter {
                     Ok(Value::None)
                 }
             }
-            NodeKind::VariableAccess(key) => scope.borrow().get(key.as_str(), span),
+            NodeKind::VariableAccess(key) => {
+                let val = scope.read().unwrap().get(key.as_str(), span)?;
+                Ok(Value::clone(&val.clone().read().unwrap()))
+            }
             NodeKind::VariableDeclaration(key, expr) => {
                 let value = self.run(expr, scope.clone())?;
                 scope
-                    .borrow_mut()
-                    .declare(key.as_str(), value, span)
+                    .write()
+                    .unwrap()
+                    .declare(key.as_str(), GC.write().unwrap().monitor(value), span)
                     .map(|_| Value::None)
             }
             NodeKind::Assignment(key, expr) => {
                 let value = self.run(expr, scope.clone())?;
-                self.simple_assign(key, value, scope.clone(), span)
+                self.simple_assign(key, GC.write().unwrap().monitor(value), scope, span)
             }
             NodeKind::CompoundAssignment(op, lhs, rhs) => {
                 let rhs = self.run(rhs, scope.clone())?;
                 self.handle_assign(
                     lhs,
-                    |lhs: Value| match op {
-                        BinaryOp::Add => lhs.add(&rhs, span),
-                        BinaryOp::Subtract => lhs.subtract(&rhs, span),
-                        BinaryOp::Multiply => lhs.multiply(&rhs, span),
-                        BinaryOp::Divide => lhs.divide(&rhs, span),
-                        BinaryOp::Modulus => lhs.modulo(&rhs, span),
-                        BinaryOp::Power => lhs.power(&rhs, span),
-                        _ => unreachable!(),
+                    |lhs| {
+                        let lhs = lhs.read().unwrap();
+                        let val = match op {
+                            BinaryOp::Add => lhs.add(&rhs, span),
+                            BinaryOp::Subtract => lhs.subtract(&rhs, span),
+                            BinaryOp::Multiply => lhs.multiply(&rhs, span),
+                            BinaryOp::Divide => lhs.divide(&rhs, span),
+                            BinaryOp::Modulus => lhs.modulo(&rhs, span),
+                            BinaryOp::Power => lhs.power(&rhs, span),
+                            _ => unreachable!(),
+                        }?;
+                        Ok(GC.write().unwrap().monitor(val))
                     },
                     scope.clone(),
                     span,
                 )
             }
             NodeKind::NoneLiteral => Ok(Value::None),
-            NodeKind::StringLiteral(string) => Ok(Value::String(Rc::new(string.to_string()))),
+            NodeKind::StringLiteral(string) => Ok(Value::String(Arc::from(string.clone()))),
             NodeKind::FloatLiteral(val) => Ok(Value::Float(*val)),
             NodeKind::IntegerLiteral(val) => Ok(Value::Integer(*val as isize)),
             NodeKind::BooleanLiteral(val) => Ok(Value::Boolean(*val)),
@@ -244,7 +249,9 @@ impl Interpreter {
                 BinaryOp::CompareEq => Ok(dispatch_op!(Value::equals, lhs, rhs)),
                 BinaryOp::CompareNotEq => Ok(dispatch_op!(Value::not_equals, lhs, rhs)),
                 BinaryOp::CompareGreaterThan => dispatch_op!(Value::greater_than, lhs, rhs),
-                BinaryOp::CompareGreaterThanEq => dispatch_op!(Value::greater_than_equal, lhs, rhs),
+                BinaryOp::CompareGreaterThanEq => {
+                    dispatch_op!(Value::greater_than_equal, lhs, rhs)
+                }
                 BinaryOp::CompareLessThan => dispatch_op!(Value::less_than, lhs, rhs),
                 BinaryOp::CompareLessThanEq => dispatch_op!(Value::less_than_eq, lhs, rhs),
             },
@@ -254,12 +261,15 @@ impl Interpreter {
             },
             NodeKind::Block(_) => {
                 let scope = Scope::new(Some(scope));
-                self.run_block(node, scope)
+                let val = self.run_block(node, scope);
+                GC.write().unwrap().collect();
+                val
             }
             NodeKind::Function {
                 name,
                 body,
                 args: raw_args,
+                captures,
             } => {
                 let mut args = IndexMap::new();
                 for argument in raw_args.clone() {
@@ -272,29 +282,47 @@ impl Interpreter {
                         }
                         FunctionArg::Keyword(span, name, default) => {
                             let value = self.run(&default, scope.clone())?;
-                            args.insert(name.clone(), value::FunctionArg::Keyword(span, value));
+                            args.insert(
+                                name.clone(),
+                                value::FunctionArg::Keyword(
+                                    span,
+                                    GC.write().unwrap().monitor(value),
+                                ),
+                            );
                         }
                         FunctionArg::KeywordVariadic(_span, name) => {
                             args.insert(name.clone(), value::FunctionArg::KeywordVariadic(()));
                         }
                     }
                 }
+                let function_scope = Scope::new(None);
+                for (capture, span) in captures {
+                    let val = scope.clone().read().unwrap().get(capture, *span)?;
+                    function_scope
+                        .write()
+                        .unwrap()
+                        .declare(capture, val, *span)?;
+                }
                 let function = Value::Function(ref_it!(Function {
                     span,
                     name: name.clone(),
                     args,
-                    scope: scope.clone(),
+                    scope: function_scope,
                     run: FunctionRun::Program(body.clone()),
                 }));
                 if let Some(name) = name {
-                    scope.borrow_mut().declare(name, function, span)?;
+                    scope.write().unwrap().declare(
+                        name,
+                        GC.write().unwrap().monitor(function),
+                        span,
+                    )?;
                     Ok(Value::None)
                 } else {
                     Ok(function)
                 }
             }
             NodeKind::Return(expr) => {
-                if !scope.borrow().in_function {
+                if !scope.read().unwrap().in_function {
                     return Err(SyntaxError("Return used outside of function".to_string())
                         .make(span)
                         .into());
@@ -342,7 +370,7 @@ impl Interpreter {
         callee.call(self, args, span)
     }
 
-    pub fn handle_assign<F: FnOnce(Value) -> Result<Value>>(
+    pub fn handle_assign<F: FnOnce(Ref<Value>) -> Result<Ref<Value>>>(
         &self,
         key: &Node,
         f: F,
@@ -350,7 +378,10 @@ impl Interpreter {
         span: Span,
     ) -> Result<Value> {
         match &key.kind {
-            NodeKind::VariableAccess(key) => scope.borrow_mut().assign(key, f, span),
+            NodeKind::VariableAccess(key) => {
+                let val = scope.write().unwrap().assign(key, f, span)?;
+                Ok(Value::clone(&val.clone().read().unwrap()))
+            }
             _ => Err(SyntaxError("Invalid assignment target".to_string())
                 .make(span)
                 .into()),
@@ -360,7 +391,7 @@ impl Interpreter {
     pub fn simple_assign(
         &self,
         key: &Node,
-        value: Value,
+        value: Ref<Value>,
         scope: Ref<Scope>,
         span: Span,
     ) -> Result<Value> {
@@ -375,67 +406,4 @@ enum ControlFlow {
     Continue,
     Break,
     Return,
-}
-
-pub struct Scope {
-    parent: Option<Ref<Scope>>,
-    variables: HashMap<String, Value, FxBuildHasher>,
-    in_function: bool,
-}
-
-impl Scope {
-    pub fn new(parent: Option<Ref<Self>>) -> Ref<Self> {
-        let in_function = parent
-            .clone()
-            .map_or(false, |scope| scope.borrow().in_function);
-        ref_it!(Self {
-            parent,
-            variables: HashMap::with_hasher(FxBuildHasher),
-            in_function
-        })
-    }
-
-    fn _get(&self, key: &str) -> Option<Value> {
-        match self.variables.get(key) {
-            Some(value) => Some(value.clone()),
-            None => match self.parent {
-                Some(ref parent) => parent.borrow()._get(key),
-                None => None,
-            },
-        }
-    }
-
-    pub fn get(&self, key: &str, span: Span) -> Result<Value> {
-        match self._get(key) {
-            Some(value) => Ok(value),
-            None => Err(VariableNotFound(key.to_string()).make(span).into()),
-        }
-    }
-
-    pub fn declare(&mut self, key: &str, value: Value, span: Span) -> Result<()> {
-        if self.variables.contains_key(key) {
-            Err(VariableAlreadyExists(key.to_string()).make(span).into())
-        } else {
-            self.variables.insert(key.to_string(), value);
-            Ok(())
-        }
-    }
-
-    pub fn assign<F: FnOnce(Value) -> Result<Value>>(
-        &mut self,
-        key: &str,
-        f: F,
-        span: Span,
-    ) -> Result<Value> {
-        match self.variables.get_mut(key) {
-            Some(value) => {
-                *value = f(value.clone())?;
-                Ok(value.clone())
-            }
-            None => match self.parent {
-                Some(ref parent) => parent.borrow_mut().assign(key, f, span),
-                None => Err(VariableNotFound(key.to_string()).make(span).into()),
-            },
-        }
-    }
 }

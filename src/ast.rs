@@ -56,6 +56,7 @@ pub enum NodeKind {
     Function {
         name: Option<String>,
         args: Vec<FunctionArg>,
+        captures: Vec<(String, Span)>,
         body: Box<Node>,
     },
     Subscript {
@@ -319,16 +320,19 @@ impl<'a> Display for NodeFormatter<'a> {
                 }
                 write!(f, "}}")?;
             }
-            NodeKind::Function { name, args, body } => {
+            NodeKind::Function {
+                name,
+                args,
+                captures,
+                body,
+            } => {
                 if let Some(name) = name {
                     write!(f, "({name})")?;
                 } else {
                     write!(f, "(<anonymous>)")?;
                 }
                 writeln!(f, " {{")?;
-                f.indent(2);
-                writeln!(f, "Arguments (")?;
-                f.indent(2);
+                writeln!(f, "{{\n\tArguments (\t")?;
                 for arg in args {
                     match arg {
                         FunctionArg::Positional(_, name) => writeln!(f, "{name},")?,
@@ -339,11 +343,11 @@ impl<'a> Display for NodeFormatter<'a> {
                         }
                     }
                 }
-                f.dedent(2);
-                writeln!(f, ")")?;
-                f.dedent(2);
-                writeln!(f, "{}", self.child(body))?;
-                write!(f, "}}")?;
+                writeln!(f, "\0)\nCaptures (\t")?;
+                for (capture, _) in captures {
+                    writeln!(f, "{capture}")?;
+                }
+                writeln!(f, "\0)\n\0{}\n}}", self.child(body))?;
             }
             NodeKind::Call(expr, args) => {
                 writeln!(f, " {{")?;
