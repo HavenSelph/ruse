@@ -272,6 +272,7 @@ impl Value {
     pub fn unpack(&self, span: Span) -> Result<Ref<Vec<Self>>> {
         match self {
             Value::Array(vals) | Value::Tuple(vals) => Ok(vals.clone()),
+            Value::Iterator(vals) => Ok(ref_it!(vals.clone().collect::<Vec<Value>>())),
             _ => Err(ValueError
                 .make(span)
                 .with_message(format!("{} cannot be unpacked", self.variant_name()))
