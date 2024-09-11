@@ -61,6 +61,7 @@ pub enum TokenKind {
     StarStarEquals,
     StringLiteral,
     While,
+    Not,
 }
 
 impl Display for TokenKind {

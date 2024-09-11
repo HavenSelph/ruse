@@ -1,9 +1,9 @@
 use crate::ast::{BinaryOp, CallArg, FunctionArg, Node, NodeKind, UnaryOp};
-use crate::dprintln;
 use crate::lexer::{Base, Lexer, LexerIterator};
-use crate::report::{Report, ReportKind, ReportLevel, ReportSender, Result};
+use crate::report::{Report, ReportKind, ReportLevel, ReportSender, Result, SpanToLabel};
 use crate::span::Span;
 use crate::token::{Token, TokenKind};
+use ariadne::Color;
 use name_variant::NamedVariant;
 use std::fmt::{Display, Formatter};
 use ParserReport::*;
@@ -21,7 +21,7 @@ impl Display for ParserReport {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.variant_name())?;
         match self {
-            SyntaxError(msg) => write!(f, "{}", msg)?,
+            SyntaxError(msg) => write!(f, ": {}", msg)?,
             InvalidInteger(base) => write!(f, ": of base {base:?}")?,
             UnexpectedToken(kind) => write!(f, ": {kind}")?,
             _ => (),
@@ -248,7 +248,6 @@ impl<'contents> Parser<'contents> {
                         Some(expr)
                     }
                 };
-                dprintln!("{} {}", init_expr.is_some(), self.current);
                 let condition_expr = match self.current.kind {
                     TokenKind::SemiColon => {
                         self.advance();
@@ -529,7 +528,21 @@ impl<'contents> Parser<'contents> {
     fn parse_comparison(&mut self) -> Result<Box<Node>> {
         let lhs = self.parse_additive()?;
         match self.current.kind {
+            TokenKind::Not => {
+                self.advance();
+                let op = match self.current.kind {
+                    TokenKind::In => {
+                        self.advance();
+                        BinaryOp::NotIn
+                    }
+                    _ => BinaryOp::Not,
+                };
+                let rhs = self.parse_comparison()?;
+                let span = lhs.span.extend(rhs.span);
+                Ok(NodeKind::BinaryOperation(op, lhs, rhs).make(span).into())
+            }
             TokenKind::BangEquals
+            | TokenKind::In
             | TokenKind::EqualsEquals
             | TokenKind::GreaterThan
             | TokenKind::GreaterThanEquals
@@ -542,6 +555,7 @@ impl<'contents> Parser<'contents> {
                     TokenKind::GreaterThanEquals => BinaryOp::CompareGreaterThanEq,
                     TokenKind::LessThan => BinaryOp::CompareLessThan,
                     TokenKind::LessThanEquals => BinaryOp::CompareLessThanEq,
+                    TokenKind::In => BinaryOp::In,
                     _ => unreachable!(),
                 };
                 self.advance();
@@ -769,8 +783,8 @@ impl<'contents> Parser<'contents> {
             }
             TokenKind::StringLiteral => {
                 self.advance();
-                // todo: make this actually parse the string properly
-                Ok(NodeKind::StringLiteral(text.to_string()).make(span).into())
+                let text = StringParser::new(text, span).parse()?;
+                Ok(NodeKind::StringLiteral(text).make(span).into())
             }
             TokenKind::BooleanLiteral => {
                 self.advance();
@@ -873,5 +887,96 @@ impl<'contents> Parser<'contents> {
             };
         }
         Ok(arguments)
+    }
+}
+
+struct StringParser<'contents> {
+    span: Span,
+    source: &'contents str,
+    char_indices: std::iter::Peekable<std::str::CharIndices<'contents>>,
+    current_char: Option<char>,
+    current_index: usize,
+}
+
+impl<'contents> StringParser<'contents> {
+    pub fn new(source: &'contents str, span: Span) -> Self {
+        let mut parser = Self {
+            span,
+            source,
+            char_indices: source.char_indices().peekable(),
+            current_char: None,
+            current_index: 0,
+        };
+        parser.advance();
+        parser
+    }
+    fn advance(&mut self) {
+        let current = self.char_indices.next();
+        self.current_char = current.map(|(_, c)| c);
+        self.current_index = current.map(|(i, _)| i).unwrap_or(self.current_index + 1);
+    }
+    fn span_at(&mut self, i: usize) -> Span {
+        Span::at(self.span.filename, self.span.start + i)
+    }
+
+    pub fn parse(&mut self) -> Result<String> {
+        let mut buf = String::with_capacity(self.source.len());
+        while let Some(char) = self.current_char {
+            match char {
+                '\\' => {
+                    let start = self.span_at(self.current_index);
+                    self.advance();
+                    let escaped = self.current_char.expect("Lexer left a hanging escape");
+                    self.advance();
+                    match escaped {
+                        '\\' | '\'' | '"' => buf.push(escaped),
+                        'n' => buf.push('\n'),
+                        'r' => buf.push('\r'),
+                        't' => buf.push('\t'),
+                        'b' => buf.push('\u{0008}'),
+                        'f' => buf.push('\u{000C}'),
+                        '0' => buf.push('\0'),
+                        'u' => {
+                            let text_start = self.current_index;
+                            for _ in 0..4 {
+                                self.advance();
+                            }
+                            let text_end = self.current_index;
+                            let text_span = start.extend(self.span_at(text_end));
+                            let text = &self.source[text_start..text_end];
+                            let val = u16::from_str_radix(text, 16).map_err(|e| {
+                                SyntaxError(format!("Invalid Unicode Escape Sequence: {text}"))
+                                    .make(text_span)
+                                    .with_message(e)
+                                    .with_label(self.span.label().with_color(Color::Blue))
+                            })?;
+                            let u_char = char::decode_utf16(vec![val])
+                                .next()
+                                .expect("Got None from unicode decoder")
+                                .map_err(|e| {
+                                    SyntaxError(format!("Invalid Unicode Escape Sequence: {text}"))
+                                        .make(text_span)
+                                        .with_message(e)
+                                        .with_label(self.span.label().with_color(Color::Blue))
+                                })?;
+                            buf.push(u_char);
+                        }
+                        unexpected => {
+                            return Err(SyntaxError(format!(
+                                "Invalid Escape Character: {unexpected}"
+                            ))
+                            .make(start.extend(self.span_at(self.current_index)))
+                            .with_label(self.span.label().with_color(Color::Blue))
+                            .into())
+                        }
+                    }
+                }
+                c => {
+                    self.advance();
+                    buf.push(c);
+                }
+            }
+        }
+        Ok(buf)
     }
 }

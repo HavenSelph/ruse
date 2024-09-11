@@ -1,16 +1,19 @@
+use crate::interpreter::scope::Scope;
 use crate::interpreter::value::ValueReport::*;
 use crate::interpreter::InterpreterReport::SyntaxError;
-use crate::interpreter::{ControlFlow, Interpreter, Ref, Scope};
+use crate::interpreter::{ControlFlow, Interpreter, Ref};
 use crate::ref_it;
 use crate::report::{ReportKind, ReportLevel, Result, SpanToLabel};
 use crate::span::Span;
 use ariadne::Color;
 use indexmap::IndexMap;
 use name_variant::NamedVariant;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::fmt::Formatter;
 use std::ops::{IndexMut, Neg};
-use std::sync::{Arc, RwLock, Weak};
+use std::rc::{Rc, Weak};
+use std::vec;
 
 #[derive(NamedVariant)]
 enum ValueReport {
@@ -34,6 +37,62 @@ impl From<ValueReport> for ReportLevel {
 }
 
 impl ReportKind for ValueReport {}
+
+#[derive(Clone)]
+pub struct IteratorValue(pub Ref<dyn Iterator<Item = Value>>);
+
+impl Iterator for IteratorValue {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let Self(iter) = self;
+        iter.borrow_mut().next()
+    }
+}
+
+struct SequenceIterator {
+    array: Ref<Vec<Value>>,
+    current: usize,
+}
+
+impl SequenceIterator {
+    pub fn new(array: Ref<Vec<Value>>) -> Self {
+        Self { array, current: 0 }
+    }
+}
+
+impl Iterator for SequenceIterator {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let val = self.array.borrow().get(self.current).cloned();
+        self.current += 1;
+        val
+    }
+}
+
+struct StringIterator {
+    source: Rc<str>,
+    index: usize,
+}
+
+impl StringIterator {
+    pub fn new(source: Rc<str>) -> Self {
+        Self { source, index: 0 }
+    }
+}
+
+impl Iterator for StringIterator {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let slice = self.source.get(self.index..)?;
+        let c = slice.chars().next()?;
+        self.index += 1;
+        Some(Value::String(Rc::from(c.to_string().as_str())))
+    }
+}
+
 pub type BuiltInFunction = Box<dyn Fn(Ref<Scope>, Span) -> Result<Value> + Send + Sync>;
 #[allow(dead_code)]
 pub enum FunctionRun {
@@ -52,8 +111,7 @@ pub struct Function {
     pub span: Span,
     pub name: Option<String>,
     pub args: IndexMap<String, FunctionArg>,
-    pub scope: Ref<Scope>,
-    pub globals: Option<Weak<RwLock<Scope>>>,
+    pub scope: Option<Weak<RefCell<Scope>>>,
     pub run: FunctionRun,
 }
 
@@ -69,9 +127,10 @@ pub enum Value {
     Integer(isize),
     Float(f64),
     Boolean(bool),
-    String(Arc<str>),
+    String(Rc<str>),
     Array(Ref<Vec<Value>>),
     Tuple(Ref<Vec<Value>>),
+    Iterator(IteratorValue),
     None,
 }
 
@@ -81,7 +140,7 @@ impl std::fmt::Debug for Value {
         match self {
             Value::Array(vals) => {
                 write!(f, "[")?;
-                for (i, val) in vals.read().unwrap().iter().enumerate() {
+                for (i, val) in vals.borrow().iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -91,7 +150,7 @@ impl std::fmt::Debug for Value {
             }
             Value::Tuple(vals) => {
                 write!(f, "(")?;
-                for (i, val) in vals.read().unwrap().iter().enumerate() {
+                for (i, val) in vals.borrow().iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -105,7 +164,7 @@ impl std::fmt::Debug for Value {
             Value::String(val) => write!(f, "{val:?}")?,
             Value::None => write!(f, "None")?,
             Value::Function(function) => {
-                let function = function.read().unwrap();
+                let function = function.borrow();
                 let kind = match function.run {
                     FunctionRun::BuiltIn(_) => "BuiltIn-Function",
                     FunctionRun::Program(..) => "Function",
@@ -121,6 +180,7 @@ impl std::fmt::Debug for Value {
                     function.span
                 )?;
             }
+            Value::Iterator(_) => write!(f, "<iterator>")?,
         }
         write!(f, ")")?;
         Ok(())
@@ -132,7 +192,7 @@ impl std::fmt::Display for Value {
         match self {
             Value::Array(vals) => {
                 write!(f, "[")?;
-                for (i, val) in vals.read().unwrap().iter().enumerate() {
+                for (i, val) in vals.borrow().iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -142,7 +202,7 @@ impl std::fmt::Display for Value {
             }
             Value::Tuple(vals) => {
                 write!(f, "(")?;
-                for (i, val) in vals.read().unwrap().iter().enumerate() {
+                for (i, val) in vals.borrow().iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -156,6 +216,7 @@ impl std::fmt::Display for Value {
             Value::String(val) => write!(f, "{val}")?,
             Value::None => write!(f, "None")?,
             Value::Function { .. } => write!(f, "{self:?}")?,
+            Value::Iterator(_) => write!(f, "<iterator>")?,
         }
         Ok(())
     }
@@ -170,7 +231,7 @@ impl Value {
     ) -> Result<Self> {
         match (self, slice) {
             (Value::Array(vals) | Value::Tuple(vals), Value::Integer(idx)) => {
-                if *idx as usize >= vals.read().unwrap().len() {
+                if *idx as usize >= vals.borrow().len() {
                     Err(ValueError
                         .make(span)
                         .with_message(format!(
@@ -179,7 +240,7 @@ impl Value {
                         ))
                         .into())
                 } else {
-                    f(vals.write().unwrap().index_mut(*idx as usize))
+                    f(vals.borrow_mut().index_mut(*idx as usize))
                 }
             }
             _ => Err(ValueError
@@ -190,7 +251,22 @@ impl Value {
     }
 
     pub fn subscript(&self, slice: &Self, span: Span) -> Result<Self> {
-        self.subscript_mut(slice, |value| Ok(value.clone()), span)
+        match (self, slice) {
+            (Value::String(str), Value::Integer(idx)) => str
+                .chars()
+                .nth(*idx as usize)
+                .map(|c| Value::String(Rc::from(c.to_string().as_str())))
+                .ok_or(
+                    ValueError
+                        .make(span)
+                        .with_message(format!(
+                            "Index {idx} out of bounds on {}",
+                            self.variant_name()
+                        ))
+                        .into(),
+                ),
+            _ => self.subscript_mut(slice, |val| Ok(val.clone()), span),
+        }
     }
 
     pub fn unpack(&self, span: Span) -> Result<Ref<Vec<Self>>> {
@@ -211,13 +287,17 @@ impl Value {
     ) -> Result<Self> {
         match self {
             Value::Function(function) => {
-                let function = function.read().unwrap();
-                let scope = Scope::new(Some(function.scope.clone()), function.globals.clone());
+                let function = function.borrow();
+                let parent = function
+                    .scope
+                    .clone()
+                    .map(|g_scope| g_scope.upgrade().unwrap());
+                let scope = Scope::new(parent);
                 let mut call_args = call_args.iter().peekable();
                 let mut arg_map: IndexMap<&String, &FunctionArg> =
                     IndexMap::from_iter(function.args.iter().rev());
                 {
-                    let mut scope = scope.write().unwrap();
+                    let mut scope = scope.borrow_mut();
                     scope.in_function = true;
                     while let Some(CallArg::Positional(span, val)) = call_args.peek() {
                         call_args.next();
@@ -303,12 +383,11 @@ impl Value {
     pub fn add(&self, other: &Self, span: Span) -> Result<Self> {
         Ok(match (&self, &other) {
             (Value::Array(lhs), Value::Array(rhs)) => Value::Array(ref_it!(lhs
-                .read()
-                .unwrap()
+                .borrow()
                 .iter()
-                .chain(rhs.read().unwrap().iter())
+                .chain(rhs.borrow().iter())
                 .fold(
-                    Vec::with_capacity(lhs.read().unwrap().len() + rhs.read().unwrap().len()),
+                    Vec::with_capacity(lhs.borrow().len() + rhs.borrow().len()),
                     |mut vec, val| {
                         vec.push(val.clone());
                         vec
@@ -319,7 +398,9 @@ impl Value {
             (Value::Float(lhs), Value::Integer(rhs)) => Value::Float(lhs + *rhs as f64),
             (Value::Float(lhs), Value::Float(rhs)) => Value::Float(lhs + rhs),
             (Value::String(lhs), Value::String(rhs)) => {
-                Value::String(Arc::from([lhs.clone(), rhs.clone()].concat()))
+                let mut string = lhs.to_string();
+                string.push_str(rhs);
+                Value::String(Rc::from(string.as_str()))
             }
             (lhs, rhs) => {
                 return Err(ValueError
@@ -359,6 +440,13 @@ impl Value {
             (Value::Integer(lhs), Value::Float(rhs)) => Value::Float(*lhs as f64 * rhs),
             (Value::Float(lhs), Value::Float(rhs)) => Value::Float(lhs * rhs),
             (Value::Float(lhs), Value::Integer(rhs)) => Value::Float(lhs * (*rhs as f64)),
+            (Value::String(lhs), Value::Integer(rhs)) => {
+                let mut string = lhs.to_string();
+                for _ in 0..*rhs {
+                    string.push_str(lhs);
+                }
+                Value::String(Rc::from(string.as_str()))
+            }
             (lhs, rhs) => {
                 return Err(ValueError
                     .make(span)
@@ -431,6 +519,25 @@ impl Value {
         })
     }
 
+    pub fn contains(&self, other: &Self, span: Span) -> Result<Self> {
+        Ok(match (&self, &other) {
+            (lhs, Value::Array(vals) | Value::Tuple(vals)) => {
+                Value::Boolean(vals.borrow().contains(lhs))
+            }
+            (lhs, Value::Iterator(iter)) => Value::Boolean(iter.clone().any(|v| v.eq(lhs))),
+            (lhs, rhs) => {
+                return Err(ValueError
+                    .make(span)
+                    .with_message(format!(
+                        "Cannot check if {} in type {}",
+                        lhs.variant_name(),
+                        rhs.variant_name()
+                    ))
+                    .into())
+            }
+        })
+    }
+
     pub fn logical_or(&self, other: &Self, _span: Span) -> Self {
         Value::Boolean(self.or(other))
     }
@@ -448,7 +555,7 @@ impl Value {
     }
 
     pub fn less_than(&self, other: &Self, span: Span) -> Result<Self> {
-        let ordering = self.cmp(other).ok_or_else(|| {
+        let ordering = self.partial_cmp(other).ok_or_else(|| {
             Box::new(ValueError.make(span).with_message(format!(
                 "Cannot compare equality with type {} with {}",
                 self.variant_name(),
@@ -459,7 +566,7 @@ impl Value {
     }
 
     pub fn less_than_eq(&self, other: &Self, span: Span) -> Result<Self> {
-        let ordering = self.cmp(other).ok_or_else(|| {
+        let ordering = self.partial_cmp(other).ok_or_else(|| {
             Box::new(ValueError.make(span).with_message(format!(
                 "Cannot compare equality with type {} with {}",
                 self.variant_name(),
@@ -493,6 +600,22 @@ impl Value {
         })
     }
 
+    pub fn as_iter(&self, span: Span) -> Result<Self> {
+        match self {
+            Value::String(str) => Ok(Value::Iterator(IteratorValue(ref_it!(
+                StringIterator::new(str.clone())
+            )))),
+            Value::Array(vals) | Value::Tuple(vals) => Ok(Value::Iterator(IteratorValue(ref_it!(
+                SequenceIterator::new(vals.clone())
+            )))),
+            Value::Iterator(_) => Ok(self.clone()),
+            lhs => Err(Box::new(ValueError.make(span).with_message(format!(
+                "Cannot turn {} into iterator",
+                lhs.variant_name()
+            )))),
+        }
+    }
+
     pub fn logical_negate(&self, _span: Span) -> Self {
         Value::Boolean(!self.as_bool())
     }
@@ -505,6 +628,34 @@ impl Value {
         self.as_bool() && other.as_bool()
     }
 
+    pub fn as_bool(&self) -> bool {
+        match self {
+            Value::Tuple(vals) => !vals.borrow().is_empty(),
+            Value::Array(vals) => !vals.borrow().is_empty(),
+            Value::Boolean(val) => *val,
+            Value::Integer(val) => *val != 0,
+            Value::Float(val) => *val != 0f64,
+            Value::String(val) => !val.is_empty(),
+            Value::Function { .. } => true,
+            Value::None => false,
+            Value::Iterator(_) => true,
+        }
+    }
+}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (&self, &other) {
+            (Value::Integer(lhs), Value::Integer(rhs)) => Some(lhs.cmp(rhs)),
+            (Value::Integer(lhs), Value::Float(rhs)) => (*lhs as f64).partial_cmp(rhs),
+            (Value::Float(lhs), Value::Float(rhs)) => lhs.partial_cmp(rhs),
+            (Value::Float(lhs), Value::Integer(rhs)) => lhs.partial_cmp(&(*rhs as f64)),
+            (_, _) => None,
+        }
+    }
+}
+
+impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (&self, &other) {
             (Value::Integer(lhs), Value::Integer(rhs)) => lhs.eq(rhs),
@@ -513,7 +664,7 @@ impl Value {
             (Value::Float(lhs), Value::Integer(rhs)) => lhs.eq(&(*rhs as f64)),
             (Value::String(lhs), Value::String(rhs)) => lhs.eq(rhs),
             (Value::Array(lhs), Value::Array(rhs)) | (Value::Tuple(lhs), Value::Tuple(rhs)) => {
-                let (left, right) = (lhs.read().unwrap(), rhs.read().unwrap());
+                let (left, right) = (lhs.borrow(), rhs.borrow());
                 if left.len() != right.len() {
                     false
                 } else {
@@ -521,29 +672,6 @@ impl Value {
                 }
             }
             (_, _) => false,
-        }
-    }
-
-    fn cmp(&self, other: &Self) -> Option<Ordering> {
-        match (&self, &other) {
-            (Value::Integer(lhs), Value::Integer(rhs)) => Some(lhs.cmp(rhs)),
-            (Value::Integer(lhs), Value::Float(rhs)) => (*lhs as f64).partial_cmp(rhs),
-            (Value::Float(lhs), Value::Float(rhs)) => lhs.partial_cmp(rhs),
-            (Value::Float(lhs), Value::Integer(rhs)) => (lhs).partial_cmp(&(*rhs as f64)),
-            (_, _) => None,
-        }
-    }
-
-    pub fn as_bool(&self) -> bool {
-        match self {
-            Value::Tuple(vals) => !vals.read().unwrap().is_empty(),
-            Value::Array(vals) => !vals.read().unwrap().is_empty(),
-            Value::Boolean(val) => *val,
-            Value::Integer(val) => *val != 0,
-            Value::Float(val) => *val != 0f64,
-            Value::String(val) => !val.is_empty(),
-            Value::Function { .. } => true,
-            Value::None => false,
         }
     }
 }

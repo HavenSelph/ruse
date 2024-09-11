@@ -4,6 +4,9 @@ use std::fmt::{Debug, Display, Formatter};
 
 #[derive(NamedVariant, Clone)]
 pub enum BinaryOp {
+    NotIn,
+    Not,
+    In,
     Add,
     Subtract,
     Multiply,
@@ -343,7 +346,7 @@ impl<'a> Display for NodeFormatter<'a> {
             NodeKind::Break => (),
             NodeKind::Continue => (),
             NodeKind::StarStarExpression(expr) | NodeKind::StarExpression(expr) => {
-                write!(f, " {{\n{}\n}}", self.child(expr))?
+                write!(f, " {{\n{}\n}}", self.child(expr))?;
             }
         }
         write!(f, "[{:?}]", self.node.span)?;

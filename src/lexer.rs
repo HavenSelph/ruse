@@ -160,6 +160,7 @@ impl<'contents> Lexer<'contents> {
                         "return" => TokenKind::Return,
                         "fn" => TokenKind::Fn,
                         "in" => TokenKind::In,
+                        "not" => TokenKind::Not,
                         "continue" => TokenKind::Continue,
                         "while" => TokenKind::While,
                         "break" => TokenKind::Break,

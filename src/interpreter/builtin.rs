@@ -1,16 +1,17 @@
+use crate::interpreter::scope::Scope;
 use crate::interpreter::value::{BuiltInFunction, Function, FunctionArg, FunctionRun, Value};
-use crate::interpreter::{Ref, Scope};
+use crate::interpreter::Ref;
 use crate::ref_it;
 use crate::report::Result;
 use crate::span::Span;
 use indexmap::IndexMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 macro_rules! get_args {
     ($scope:expr, $span:expr, $($key:ident),+$(,)?) => {
         (
             $(
-            $scope.read().unwrap().get(stringify!($key), $span)?,
+            $scope.borrow().get(stringify!($key), $span)?,
             )+
         )
     };
@@ -22,7 +23,7 @@ pub fn print() -> Ref<Function> {
             unreachable!()
         };
 
-        for (i, val) in vals.read().unwrap().iter().enumerate() {
+        for (i, val) in vals.borrow().iter().enumerate() {
             if i != 0 {
                 print!("{sep}");
             }
@@ -35,11 +36,11 @@ pub fn print() -> Ref<Function> {
         .with_arg(BuiltInFunctionArg::PositionalVariadic("vals"))
         .with_arg(BuiltInFunctionArg::Keyword(
             "sep",
-            Value::String(Arc::from(" ")),
+            Value::String(Rc::from(" ")),
         ))
         .with_arg(BuiltInFunctionArg::Keyword(
             "end",
-            Value::String(Arc::from("\n")),
+            Value::String(Rc::from("\n")),
         ))
         .finish(Box::new(execute))
 }
@@ -51,6 +52,16 @@ pub fn debug() -> Ref<Function> {
         Ok(val)
     }
     RuseBuiltIn::new("debug")
+        .with_arg(BuiltInFunctionArg::Positional("val"))
+        .finish(Box::new(execute))
+}
+
+pub fn iter() -> Ref<Function> {
+    fn execute(scope: Ref<Scope>, span: Span) -> Result<Value> {
+        let (val,) = get_args!(scope, span, val);
+        val.as_iter(span)
+    }
+    RuseBuiltIn::new("iter")
         .with_arg(BuiltInFunctionArg::Positional("val"))
         .finish(Box::new(execute))
 }
@@ -104,8 +115,7 @@ impl RuseBuiltIn {
             span,
             name: Some(self.name),
             args,
-            scope: Scope::new(None, None),
-            globals: None,
+            scope: None,
             run,
         })
     }

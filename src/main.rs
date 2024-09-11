@@ -2,7 +2,8 @@
 #![warn(clippy::complexity)]
 
 use crate::args::ARGS;
-use crate::interpreter::{Interpreter, Scope};
+use crate::interpreter::scope::Scope;
+use crate::interpreter::Interpreter;
 use crate::parser::Parser;
 use crate::report::{ReportChannel, UnwrapReport};
 
@@ -30,7 +31,7 @@ fn main() {
     reporter.check_reports();
 
     let mut interpreter = Interpreter::new();
-    let scope = Scope::new(None, None);
+    let scope = Scope::new_hm(None);
     Interpreter::register_builtins_to_scope(scope.clone());
     let val = interpreter.run_block(ast.as_ref(), scope).unwrap_report();
     dprintln!("{val}");

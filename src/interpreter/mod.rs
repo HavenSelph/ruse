@@ -1,17 +1,17 @@
 use crate::ast::{BinaryOp, CallArg, FunctionArg, Node, NodeKind, UnaryOp};
-pub use crate::interpreter::trash::Scope;
-use crate::interpreter::trash::SC;
+use crate::interpreter::scope::Scope;
 use crate::interpreter::value::{Function, FunctionRun, Value};
 use crate::report::{ReportKind, ReportLevel, Result};
 use crate::span::Span;
 use indexmap::IndexMap;
 use name_variant::NamedVariant;
+use std::cell::RefCell;
 use std::fmt::{Display, Formatter};
-use std::sync::{Arc, RwLock};
+use std::rc::Rc;
 use InterpreterReport::*;
 
 mod builtin;
-mod trash;
+pub mod scope;
 mod value;
 
 #[derive(NamedVariant)]
@@ -39,12 +39,12 @@ impl From<InterpreterReport> for ReportLevel {
 
 impl ReportKind for InterpreterReport {}
 
-type Ref<T> = Arc<RwLock<T>>;
+type Ref<T> = Rc<RefCell<T>>;
 
 #[macro_export]
 macro_rules! ref_it {
     ($val:expr) => {
-        std::sync::Arc::new(std::sync::RwLock::new($val))
+        std::rc::Rc::new(std::cell::RefCell::new($val))
     };
 }
 
@@ -64,34 +64,36 @@ impl Interpreter {
             ($($func_path:path),+$(,)?) => {
                 $(
                 let func = $func_path();
-                let name = func.read().unwrap().name.clone().unwrap();
+                let name = func.borrow().name.clone().unwrap();
                 scope
-                    .write()
-                    .unwrap()
+                    .borrow_mut()
                     .declare(&name, Value::Function(func), Span::empty())
                     .ok();
                 )+
             };
         }
-        register_builtins!(builtin::print, builtin::debug);
+        register_builtins!(builtin::print, builtin::debug, builtin::iter);
         scope
     }
 
     #[allow(unused)]
     pub fn run_and_return_scope(&mut self, node: &Node) -> Result<Ref<Scope>> {
-        let scope = Scope::new(None, None);
+        let scope = Scope::new(None);
         self.run_block(node, scope.clone()).map(|_| scope)
     }
 
     #[allow(unused)]
     pub fn execute(&mut self, node: &Node) -> Result<Ref<Scope>> {
-        let scope = Scope::new(None, None);
+        let scope = Scope::new(None);
         self.run(node, scope.clone()).map(|_| scope)
     }
 
     pub fn run_block(&mut self, node: &Node, scope: Ref<Scope>) -> Result<Value> {
         match &node.kind {
             NodeKind::Block(stmts) => {
+                if stmts.is_empty() {
+                    return Ok(Value::None);
+                }
                 let mut last = None;
                 for stmt in stmts {
                     last = Some(self.run(stmt, scope.clone())?);
@@ -124,7 +126,7 @@ impl Interpreter {
 
         match &node.kind {
             NodeKind::For(init, cond, loop_expr, body) => {
-                let scope = Scope::new(Some(scope.clone()), None);
+                let scope = Scope::new(Some(scope.clone()));
                 if let Some(init) = init {
                     self.run(init, scope.clone())?;
                 }
@@ -200,12 +202,11 @@ impl Interpreter {
                 }
             }
             NodeKind::VariableAccess(key) => {
-                let val = scope.read().unwrap().get(key.as_str(), span)?;
+                let val = scope.borrow().get(key.as_str(), span)?;
                 Ok(val)
             }
             NodeKind::VariableDeclaration(key, expr) => scope
-                .write()
-                .unwrap()
+                .borrow_mut()
                 .declare(key.as_str(), self.run(expr, scope.clone())?, span)
                 .map(|_| Value::None),
             NodeKind::Assignment(key, expr) => {
@@ -230,11 +231,16 @@ impl Interpreter {
                 )
             }
             NodeKind::NoneLiteral => Ok(Value::None),
-            NodeKind::StringLiteral(string) => Ok(Value::String(Arc::from(string.clone()))),
+            NodeKind::StringLiteral(string) => Ok(Value::String(Rc::from(string.as_str()))),
             NodeKind::FloatLiteral(val) => Ok(Value::Float(*val)),
             NodeKind::IntegerLiteral(val) => Ok(Value::Integer(*val as isize)),
             NodeKind::BooleanLiteral(val) => Ok(Value::Boolean(*val)),
             NodeKind::BinaryOperation(op, lhs, rhs) => match op {
+                BinaryOp::In => dispatch_op!(Value::contains, lhs, rhs),
+                BinaryOp::NotIn => dispatch_op!(Value::contains, lhs, rhs)?.negate(span),
+                BinaryOp::Not => Err(SyntaxError("Not is invalid here".to_string())
+                    .make(span)
+                    .into()),
                 BinaryOp::Add => dispatch_op!(Value::add, lhs, rhs),
                 BinaryOp::Subtract => dispatch_op!(Value::subtract, lhs, rhs),
                 BinaryOp::Multiply => dispatch_op!(Value::multiply, lhs, rhs),
@@ -257,12 +263,8 @@ impl Interpreter {
                 UnaryOp::Negate => dispatch_op!(Value::negate, expr),
             },
             NodeKind::Block(_) => {
-                let val = {
-                    let scope = Scope::new(Some(scope), None);
-                    self.run_block(node, scope)
-                };
-                SC.write().unwrap().collect();
-                val
+                let scope = Scope::new(Some(scope));
+                self.run_block(node, scope)
             }
             NodeKind::Function {
                 name,
@@ -291,19 +293,18 @@ impl Interpreter {
                     span,
                     name: name.clone(),
                     args,
-                    scope: Scope::new(None, None),
-                    globals: Some(Arc::downgrade(&scope)),
+                    scope: Some(Rc::downgrade(&scope)),
                     run: FunctionRun::Program(body.clone()),
                 }));
                 if let Some(name) = name {
-                    scope.write().unwrap().declare(name, function, span)?;
+                    scope.borrow_mut().declare(name, function, span)?;
                     Ok(Value::None)
                 } else {
                     Ok(function)
                 }
             }
             NodeKind::Return(expr) => {
-                if !scope.read().unwrap().in_function {
+                if !scope.borrow().in_function {
                     return Err(SyntaxError("Return used outside of function".to_string())
                         .make(span)
                         .into());
@@ -351,15 +352,14 @@ impl Interpreter {
         for arg in call_args.iter() {
             match arg {
                 CallArg::Positional(span, node) => match &node.kind {
-                    NodeKind::StarStarExpression(expr) => {
+                    NodeKind::StarStarExpression(_expr) => {
                         todo!("StarStar expression not implemented")
                     }
                     NodeKind::StarExpression(expr) if !seen_keyword => {
                         for value in self
                             .run(expr, scope.clone())?
                             .unpack(*span)?
-                            .read()
-                            .unwrap()
+                            .borrow()
                             .iter()
                         {
                             args.push(value::CallArg::Positional(*span, value.clone()))
@@ -395,12 +395,12 @@ impl Interpreter {
     ) -> Result<Value> {
         match &key.kind {
             NodeKind::VariableAccess(key) => {
-                let val = scope.write().unwrap().assign(key, f, span)?;
+                let val = scope.borrow_mut().assign(key, f, span)?;
                 Ok(val)
             }
             NodeKind::Subscript(lhs, index) => {
-                let lhs = self.run(&lhs, scope.clone())?;
-                let index = self.run(&index, scope.clone())?;
+                let lhs = self.run(lhs, scope.clone())?;
+                let index = self.run(index, scope.clone())?;
                 lhs.subscript_mut(
                     &index,
                     |v| {
