@@ -26,15 +26,17 @@ impl Display for ScopeReport {
     }
 }
 
-impl From<ScopeReport> for ReportLevel {
-    fn from(value: ScopeReport) -> Self {
-        match value {
-            VariableAlreadyExists(_) | VariableNotFound(_) => Self::Error,
+impl ReportKind for ScopeReport {
+    fn title(&self) -> String {
+        format!("{}", self)
+    }
+
+    fn level(&self) -> ReportLevel {
+        match self {
+            VariableAlreadyExists(_) | VariableNotFound(_) => ReportLevel::Error,
         }
     }
 }
-
-impl ReportKind for ScopeReport {}
 
 pub enum VariableStorage {
     Vector(Vec<(String, Value)>),
@@ -132,6 +134,15 @@ impl Scope {
         match self.try_get(key) {
             Some(value) => Ok(value),
             None => Err(VariableNotFound(key.to_string()).make(span).into()),
+        }
+    }
+
+    pub fn set(&mut self, key: &str, value: Value, span: Span) {
+        if self.variables.contains_key(key) {
+            self.assign(key, |_| Ok(value), span)
+                .expect("Failed to assign key that should exist");
+        } else {
+            self.variables.insert(key.to_string(), value);
         }
     }
 

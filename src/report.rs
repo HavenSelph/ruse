@@ -14,6 +14,7 @@ pub type Result<T> = std::result::Result<T, Box<ReportBuilder>>;
 pub type ResultFinal<T> = std::result::Result<T, Box<Report>>;
 pub type ResultErrorless<T> = std::result::Result<T, ()>;
 
+#[derive(Clone)]
 pub struct Label {
     span: Span,
     message: Option<String>,
@@ -87,7 +88,7 @@ impl<T> UnwrapReport<T> for Result<T> {
         match self {
             Ok(val) => val,
             Err(err) => {
-                ReportChannel::check_report(err.finish());
+                ReportChannel::display_report(err.finish());
                 exit(1);
             }
         }
@@ -97,7 +98,7 @@ impl<T> UnwrapReport<T> for Result<T> {
         match self {
             Ok(val) => val,
             Err(err) => {
-                ReportChannel::check_report(err.finish());
+                ReportChannel::display_report(err.finish());
                 default
             }
         }
@@ -109,7 +110,7 @@ impl<T> UnwrapReport<T> for ResultFinal<T> {
         match self {
             Ok(val) => val,
             Err(err) => {
-                ReportChannel::check_report(*err);
+                ReportChannel::display_report(*err);
                 exit(1);
             }
         }
@@ -119,23 +120,33 @@ impl<T> UnwrapReport<T> for ResultFinal<T> {
         match self {
             Ok(val) => val,
             Err(err) => {
-                ReportChannel::check_report(*err);
+                ReportChannel::display_report(*err);
                 default
             }
         }
     }
 }
 
-pub trait ReportKind: Into<ReportLevel> + Display {
+pub trait ReportKind
+where
+    Self: Sized,
+{
+    fn title(&self) -> String;
+    fn level(&self) -> ReportLevel;
+    fn incomplete(&self) -> bool {
+        false
+    }
+
     fn make(self, span: Span) -> ReportBuilder {
         ReportBuilder {
-            title: self.to_string(),
-            level: self.into(),
+            title: self.title(),
+            level: self.level(),
             span,
             message: None,
             help: None,
             note: None,
             labels: Vec::new(),
+            incomplete: self.incomplete(),
         }
     }
 }
@@ -179,6 +190,7 @@ pub struct ReportBuilder {
     help: Option<String>,
     note: Option<String>,
     labels: Vec<Label>,
+    incomplete: bool,
 }
 
 impl std::fmt::Debug for ReportBuilder {
@@ -228,6 +240,16 @@ impl ReportBuilder {
         self
     }
 
+    pub fn set_incomplete(&mut self) -> &mut Self {
+        self.incomplete = true;
+        self
+    }
+
+    pub fn incomplete(mut self) -> Self {
+        self.set_incomplete();
+        self
+    }
+
     pub fn finish(self) -> Report {
         let mut labels = Vec::with_capacity(self.labels.len() + 1);
         labels.push(
@@ -246,6 +268,7 @@ impl ReportBuilder {
             help: self.help,
             note: self.note,
             labels,
+            incomplete: self.incomplete,
         }
     }
 }
@@ -256,13 +279,15 @@ pub struct ReportConfig {
     pub compact: bool,
 }
 
+#[derive(Clone)]
 pub struct Report {
-    level: ReportLevel,
-    span: Span,
+    pub level: ReportLevel,
+    pub span: Span,
     title: String,
     help: Option<String>,
     note: Option<String>,
     labels: Vec<Label>,
+    pub incomplete: bool,
 }
 
 impl Report {
@@ -297,7 +322,7 @@ impl Report {
         builder.finish()
     }
 
-    pub fn write<W: std::io::Write>(self, dst: W, config: ReportConfig) {
+    pub fn write<W: Write>(self, dst: W, config: ReportConfig) {
         let (empty, help, note) = (self.labels.is_empty(), self.help.clone(), self.note.clone());
         self.into_ariadne_report(config)
             .write(ScannerCache {}, dst)
@@ -313,8 +338,8 @@ impl Report {
 }
 
 pub struct ReportChannel {
-    sender: Sender<Box<Report>>,
-    receiver: Receiver<Box<Report>>,
+    pub sender: Sender<Box<Report>>,
+    pub receiver: Receiver<Box<Report>>,
 }
 
 #[derive(Clone)]
@@ -340,8 +365,7 @@ impl ReportChannel {
         }
     }
 
-    pub fn check_report(report: Report) {
-        let error = report.level == ReportLevel::Error;
+    pub fn display_report(report: Report) {
         if ARGS.report_level.to_value() >= report.level {
             dprint!("Report[{}]", report.span);
             report.print(ARGS.config());

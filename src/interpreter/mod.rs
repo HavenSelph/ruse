@@ -12,7 +12,7 @@ use InterpreterReport::*;
 
 mod builtin;
 pub mod scope;
-mod value;
+pub mod value;
 
 #[derive(NamedVariant)]
 enum InterpreterReport {
@@ -29,17 +29,19 @@ impl Display for InterpreterReport {
     }
 }
 
-impl From<InterpreterReport> for ReportLevel {
-    fn from(value: InterpreterReport) -> Self {
-        match value {
-            SyntaxError(_) => Self::Error,
+impl ReportKind for InterpreterReport {
+    fn title(&self) -> String {
+        format!("{}", self)
+    }
+
+    fn level(&self) -> ReportLevel {
+        match self {
+            SyntaxError(_) => ReportLevel::Error,
         }
     }
 }
 
-impl ReportKind for InterpreterReport {}
-
-type Ref<T> = Rc<RefCell<T>>;
+pub type Ref<T> = Rc<RefCell<T>>;
 
 #[macro_export]
 macro_rules! ref_it {
@@ -74,12 +76,6 @@ impl Interpreter {
         }
         register_builtins!(builtin::print, builtin::debug, builtin::iter);
         scope
-    }
-
-    #[allow(unused)]
-    pub fn run_and_return_scope(&mut self, node: &Node) -> Result<Ref<Scope>> {
-        let scope = Scope::new(None);
-        self.run_block(node, scope.clone()).map(|_| scope)
     }
 
     #[allow(unused)]
@@ -205,10 +201,13 @@ impl Interpreter {
                 let val = scope.borrow().get(key.as_str(), span)?;
                 Ok(val)
             }
-            NodeKind::VariableDeclaration(key, expr) => scope
-                .borrow_mut()
-                .declare(key.as_str(), self.run(expr, scope.clone())?, span)
-                .map(|_| Value::None),
+            NodeKind::VariableDeclaration(key, expr) => {
+                let val = self.run(expr, scope.clone())?;
+                scope
+                    .borrow_mut()
+                    .declare(key.as_str(), val, span)
+                    .map(|_| Value::None)
+            }
             NodeKind::Assignment(key, expr) => {
                 let val = self.run(expr, scope.clone())?;
                 self.simple_assign(key, val, scope, span)

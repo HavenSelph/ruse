@@ -30,16 +30,21 @@ impl Display for ParserReport {
     }
 }
 
-impl From<ParserReport> for ReportLevel {
-    fn from(value: ParserReport) -> Self {
-        match value {
+impl ReportKind for ParserReport {
+    fn title(&self) -> String {
+        format!("{}", self)
+    }
+    fn level(&self) -> ReportLevel {
+        match self {
             InvalidFloat | InvalidInteger(_) | SyntaxError(_) | UnexpectedToken(_)
-            | UnexpectedEOF => Self::Error,
+            | UnexpectedEOF => ReportLevel::Error,
         }
     }
-}
 
-impl ReportKind for ParserReport {}
+    fn incomplete(&self) -> bool {
+        matches!(self, UnexpectedEOF)
+    }
+}
 
 pub struct Parser<'contents> {
     lexer: std::iter::Peekable<LexerIterator<'contents>>,
@@ -818,6 +823,10 @@ impl<'contents> Parser<'contents> {
                 self.advance();
                 Ok(NodeKind::NoneLiteral.make(span).into())
             }
+            TokenKind::EOF => Err(UnexpectedEOF
+                .make(span)
+                .with_message("Expected an expression")
+                .into()),
             _ => {
                 self.advance();
                 Err(UnexpectedToken(kind).make(span).into())

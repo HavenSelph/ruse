@@ -15,13 +15,15 @@ impl Display for InvalidFile {
     }
 }
 
-impl From<InvalidFile> for ReportLevel {
-    fn from(_value: InvalidFile) -> Self {
-        Self::Error
+impl ReportKind for InvalidFile {
+    fn title(&self) -> String {
+        format!("InvalidFile: {}", self.0)
+    }
+
+    fn level(&self) -> ReportLevel {
+        ReportLevel::Error
     }
 }
-
-impl ReportKind for InvalidFile {}
 
 static CACHE: LazyLock<DashMap<&'static str, &'static Source>> = LazyLock::new(|| {
     let hm = DashMap::with_capacity(2);
@@ -109,4 +111,8 @@ pub fn get_source(filename: &'static str) -> crate::report::Result<&'static Sour
                 .value_mut())
         }
     }
+}
+
+pub fn push_source(filename: &'static str, source: String) {
+    CACHE.insert(filename, Box::leak(Source::from(source).into()));
 }

@@ -21,22 +21,18 @@ enum ValueReport {
     UnexpectedArgument,
 }
 
-impl std::fmt::Display for ValueReport {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.variant_name())
+impl ReportKind for ValueReport {
+    fn title(&self) -> String {
+        format!("{}", self.variant_name())
     }
-}
 
-impl From<ValueReport> for ReportLevel {
-    fn from(value: ValueReport) -> Self {
-        match value {
-            ValueError => Self::Error,
-            UnexpectedArgument => Self::Error,
+    fn level(&self) -> ReportLevel {
+        match self {
+            ValueError => ReportLevel::Error,
+            UnexpectedArgument => ReportLevel::Error,
         }
     }
 }
-
-impl ReportKind for ValueReport {}
 
 #[derive(Clone)]
 pub struct IteratorValue(pub Ref<dyn Iterator<Item = Value>>);

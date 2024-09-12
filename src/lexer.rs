@@ -28,17 +28,23 @@ impl Display for LexerReport {
     }
 }
 
-impl From<LexerReport> for ReportLevel {
-    fn from(value: LexerReport) -> Self {
-        match value {
+impl ReportKind for LexerReport {
+    fn title(&self) -> String {
+        format!("{}", self)
+    }
+
+    fn level(&self) -> ReportLevel {
+        match self {
             SyntaxError | UnterminatedString | UnterminatedComment | UnexpectedCharacter(_) => {
-                Self::Error
+                ReportLevel::Error
             }
         }
     }
-}
 
-impl ReportKind for LexerReport {}
+    fn incomplete(&self) -> bool {
+        matches!(self, UnterminatedComment)
+    }
+}
 
 pub struct Lexer<'contents> {
     filename: &'static str,

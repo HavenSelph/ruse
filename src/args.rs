@@ -7,19 +7,15 @@ pub static ARGS: LazyLock<Args> = LazyLock::new(|| Args::parse(std::env::args().
 
 struct ArgsError(String);
 
-impl Display for ArgsError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ArgParser: {}", self.0)
+impl ReportKind for ArgsError {
+    fn title(&self) -> String {
+        format!("ArgParser: {}", self.0)
+    }
+
+    fn level(&self) -> ReportLevel {
+        ReportLevel::Error
     }
 }
-
-impl From<ArgsError> for ReportLevel {
-    fn from(_value: ArgsError) -> Self {
-        Self::Error
-    }
-}
-
-impl ReportKind for ArgsError {}
 
 macro_rules! error {
     ($($ident:tt)*) => {
@@ -45,7 +41,7 @@ impl<T: Copy + Clone> Arg<T> {
         }
     }
 
-    fn try_mut<N: std::fmt::Display>(&mut self, name: N, value: T) {
+    fn try_mut<N: Display>(&mut self, name: N, value: T) {
         if self.set {
             error!("{} may only be used once", name);
         }
@@ -72,8 +68,8 @@ impl<T: Debug + Copy + Clone> Debug for Arg<T> {
 
 #[derive(Debug, Copy, Clone)]
 pub struct Args {
-    pub input: Arg<&'static str>,
-    pub output: Arg<&'static str>,
+    pub input: Arg<Option<&'static str>>,
+    pub repl: Arg<bool>,
     pub debug: Arg<bool>,
     pub report_level: Arg<ReportLevel>,
     pub compact: Arg<bool>,
@@ -100,8 +96,8 @@ macro_rules! make_getter {
 }
 
 make_getter! {
-    input: &'static str=(""),
-    output: &'static str=(""),
+    input: Option<&'static str>=(None),
+    repl: bool=(false),
     debug: bool=(false),
     report_level: ReportLevel=(ReportLevel::Warn),
     compact: bool=(false),
@@ -168,12 +164,8 @@ impl Args {
                     };
                     self.report_level.try_mut(arg, level);
                 }
-                "-o" | "--output" => {
-                    is_end!();
-                    let Some(output) = arguments.next() else {
-                        error!("{} expected FILE", arg);
-                    };
-                    self.output.try_mut(arg, Box::leak(output.into_boxed_str()));
+                "-r" | "--repl" => {
+                    self.repl.try_mut(arg, true);
                 }
                 "--no-context" => {
                     self.context.try_mut(arg, false);
@@ -195,26 +187,23 @@ impl Args {
             if arg.starts_with("-") {
                 out.handle_arg(&arg, &mut args)
             } else {
-                out.input.try_mut("Filename", arg.leak());
+                out.input.try_mut("Filename", Some(arg.leak()));
                 break;
             }
         }
         if let Some(arg) = args.next() {
             error!("unexpected argument '{}'", arg);
         }
-        if !out.input.set {
-            error!("specify an input file");
-        }
 
         out
     }
 }
 
-const USAGE: &str = "ruse [-hVd] [-l LEVEL] [-o FILE] <INPUT FILE>";
+const USAGE: &str = "ruse [-hVdr] [-l LEVEL] <INPUT FILE>";
 const HELP_MESSAGE: &str = "\x1b[1mDESCRIPTION\x1b[0m
     Ruse is a compiled programming language designed and developed by
     Haven Selph. It is intended to be a learning experience, and is
-    absolutely not gauranteed to be consitent, functional in all
+    absolutely not guaranteed to be consistent, functional in all
     contexts, or performant. Use at your own discretion.
 
 \x1b[1mOPTIONS\x1b[0m
@@ -223,8 +212,7 @@ const HELP_MESSAGE: &str = "\x1b[1mDESCRIPTION\x1b[0m
     -d, --debug                       Show debug information (likely not useful for you)
     -l, --report-level LEVEL          Set minimum level for a report to be shown
        (default: error)               [advice|warn|error|silent]
-    -o, --output FILE
-        (default: ./out)
+    -r, --repl                        Run the REPL
 
         --no-context                   Disable code context
         --compact                      Display reports in one line
