@@ -89,6 +89,24 @@ impl Iterator for StringIterator {
     }
 }
 
+pub struct NumberIterator {
+    pub(crate) current: isize,
+    pub(crate) stop: isize,
+    pub(crate) increment: isize,
+}
+
+impl Iterator for NumberIterator {
+    type Item = Value;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current == self.stop {
+            return None;
+        }
+        let value = Value::Integer(self.current);
+        self.current += self.increment;
+        Some(value)
+    }
+}
+
 pub type BuiltInFunction = Box<dyn Fn(Ref<Scope>, Span) -> Result<Value> + Send + Sync>;
 #[allow(dead_code)]
 pub enum FunctionRun {
@@ -117,6 +135,22 @@ pub enum CallArg {
     Keyword(Span, String, Value),
 }
 
+#[derive(Clone)]
+pub struct Class {
+    pub span: Span,
+    pub name: String,
+    pub class_fields: Ref<Vec<Value>>,
+    pub instance_fields: Ref<Vec<Value>>,
+}
+
+#[derive(Clone)]
+pub struct ClassInstance {
+    pub span: Span,
+    pub name: String,
+    pub class: Ref<Class>,
+    pub fields: Ref<Vec<Value>>,
+}
+
 #[derive(NamedVariant, Clone)]
 pub enum Value {
     Function(Ref<Function>),
@@ -127,12 +161,13 @@ pub enum Value {
     Array(Ref<Vec<Value>>),
     Tuple(Ref<Vec<Value>>),
     Iterator(IteratorValue),
+    Class(Ref<Class>),
+    ClassInstance(Ref<ClassInstance>),
     None,
 }
 
 impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Value(")?;
         match self {
             Value::Array(vals) => {
                 write!(f, "[")?;
@@ -159,26 +194,11 @@ impl std::fmt::Debug for Value {
             Value::Boolean(val) => write!(f, "{val}")?,
             Value::String(val) => write!(f, "{val:?}")?,
             Value::None => write!(f, "None")?,
-            Value::Function(function) => {
-                let function = function.borrow();
-                let kind = match function.run {
-                    FunctionRun::BuiltIn(_) => "BuiltIn-Function",
-                    FunctionRun::Program(..) => "Function",
-                };
-                write!(
-                    f,
-                    "<{kind}: {} at {}>",
-                    function
-                        .name
-                        .as_ref()
-                        .map(|s| format!("{s:?}"))
-                        .unwrap_or("<anonymous>".to_string()),
-                    function.span
-                )?;
-            }
-            Value::Iterator(_) => write!(f, "<iterator>")?,
+            Value::Function(_) => write!(f, "{self}")?,
+            Value::Iterator(_) => write!(f, "{self}")?,
+            Value::Class(_) => write!(f, "{self}")?,
+            Value::ClassInstance(_) => write!(f, "{self}")?,
         }
-        write!(f, ")")?;
         Ok(())
     }
 }
@@ -211,8 +231,38 @@ impl std::fmt::Display for Value {
             Value::Boolean(val) => write!(f, "{val}")?,
             Value::String(val) => write!(f, "{val}")?,
             Value::None => write!(f, "None")?,
-            Value::Function { .. } => write!(f, "{self:?}")?,
+            Value::Function(function) => {
+                let function = function.borrow();
+                let kind = match function.run {
+                    FunctionRun::BuiltIn(_) => "BuiltIn-Function",
+                    FunctionRun::Program(..) => "Function",
+                };
+                write!(
+                    f,
+                    "<{kind}: {} at {}>",
+                    function
+                        .name
+                        .as_ref()
+                        .map(|s| format!("{s:?}"))
+                        .unwrap_or("<anonymous>".to_string()),
+                    function.span
+                )?;
+            }
             Value::Iterator(_) => write!(f, "<iterator>")?,
+            Value::Class(class) => {
+                let class = class.borrow();
+                write!(f, "<class: {} at {}>", class.name, class.span)?;
+            }
+            Value::ClassInstance(instance) => {
+                let instance = instance.borrow();
+                write!(
+                    f,
+                    "<class-instance of {}: {} at {}>",
+                    instance.class.borrow().name,
+                    instance.name,
+                    instance.span
+                )?;
+            }
         }
         Ok(())
     }
@@ -285,6 +335,7 @@ impl Value {
         match self {
             Value::Function(function) => {
                 let function = function.borrow();
+                //todo closures dont work anymore WHATTTTTT!!!!
                 let parent = function
                     .scope
                     .clone()
@@ -633,9 +684,8 @@ impl Value {
             Value::Integer(val) => *val != 0,
             Value::Float(val) => *val != 0f64,
             Value::String(val) => !val.is_empty(),
-            Value::Function { .. } => true,
             Value::None => false,
-            Value::Iterator(_) => true,
+            _ => true,
         }
     }
 }

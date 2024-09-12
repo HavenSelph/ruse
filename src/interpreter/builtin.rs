@@ -1,11 +1,25 @@
 use crate::interpreter::scope::Scope;
-use crate::interpreter::value::{BuiltInFunction, Function, FunctionArg, FunctionRun, Value};
+use crate::interpreter::value::{
+    BuiltInFunction, Function, FunctionArg, FunctionRun, IteratorValue, NumberIterator, Value,
+};
 use crate::interpreter::Ref;
 use crate::ref_it;
-use crate::report::Result;
+use crate::report::{ReportKind, ReportLevel, Result};
 use crate::span::Span;
 use indexmap::IndexMap;
 use std::rc::Rc;
+
+struct BuiltinError(String);
+
+impl ReportKind for BuiltinError {
+    fn title(&self) -> String {
+        format!("BuiltinError: {}", self.0)
+    }
+
+    fn level(&self) -> ReportLevel {
+        ReportLevel::Error
+    }
+}
 
 macro_rules! get_args {
     ($scope:expr, $span:expr, $($key:ident),+$(,)?) => {
@@ -17,7 +31,7 @@ macro_rules! get_args {
     };
 }
 
-pub fn print() -> Ref<Function> {
+pub fn print() -> Value {
     fn execute(scope: Ref<Scope>, span: Span) -> Result<Value> {
         let (Value::Tuple(vals), sep, end) = get_args!(scope, span, vals, sep, end) else {
             unreachable!()
@@ -45,7 +59,29 @@ pub fn print() -> Ref<Function> {
         .finish(Box::new(execute))
 }
 
-pub fn debug() -> Ref<Function> {
+pub fn range() -> Value {
+    fn execute(scope: Ref<Scope>, span: Span) -> Result<Value> {
+        let (Value::Integer(stop), Value::Integer(start), Value::Integer(increment)) =
+            get_args!(scope, span, stop, start, step)
+        else {
+            return Err(BuiltinError("Incorrect argument types".to_string())
+                .make(span)
+                .into());
+        };
+        Ok(Value::Iterator(IteratorValue(ref_it!(NumberIterator {
+            current: 0,
+            stop,
+            increment,
+        }))))
+    }
+    RuseBuiltIn::new("range")
+        .with_arg(BuiltInFunctionArg::Positional("stop"))
+        .with_arg(BuiltInFunctionArg::Keyword("start", Value::Integer(0)))
+        .with_arg(BuiltInFunctionArg::Keyword("step", Value::Integer(1)))
+        .finish(Box::new(execute))
+}
+
+pub fn debug() -> Value {
     fn execute(scope: Ref<Scope>, span: Span) -> Result<Value> {
         let (val,) = get_args!(scope, span, val);
         println!("[DEBUG {span}] {val}");
@@ -56,12 +92,68 @@ pub fn debug() -> Ref<Function> {
         .finish(Box::new(execute))
 }
 
-pub fn iter() -> Ref<Function> {
+pub fn iter() -> Value {
     fn execute(scope: Ref<Scope>, span: Span) -> Result<Value> {
         let (val,) = get_args!(scope, span, val);
         val.as_iter(span)
     }
     RuseBuiltIn::new("iter")
+        .with_arg(BuiltInFunctionArg::Positional("val"))
+        .finish(Box::new(execute))
+}
+
+pub fn str() -> Value {
+    fn execute(scope: Ref<Scope>, span: Span) -> Result<Value> {
+        let (val,) = get_args!(scope, span, val);
+        Ok(Value::String(Rc::from(val.to_string())))
+    }
+    RuseBuiltIn::new("str")
+        .with_arg(BuiltInFunctionArg::Positional("val"))
+        .finish(Box::new(execute))
+}
+
+pub fn array() -> Value {
+    fn execute(scope: Ref<Scope>, span: Span) -> Result<Value> {
+        let (val,) = get_args!(scope, span, val);
+        let Value::Iterator(iter) = val.as_iter(span)? else {
+            unreachable!()
+        };
+        Ok(Value::Array(ref_it!(iter.collect())))
+    }
+    RuseBuiltIn::new("array")
+        .with_arg(BuiltInFunctionArg::PositionalVariadic("val"))
+        .finish(Box::new(execute))
+}
+pub fn tuple() -> Value {
+    fn execute(scope: Ref<Scope>, span: Span) -> Result<Value> {
+        let (val,) = get_args!(scope, span, val);
+        let Value::Iterator(iter) = val.as_iter(span)? else {
+            unreachable!()
+        };
+        Ok(Value::Tuple(ref_it!(iter.collect())))
+    }
+    RuseBuiltIn::new("tuple")
+        .with_arg(BuiltInFunctionArg::PositionalVariadic("val"))
+        .finish(Box::new(execute))
+}
+
+pub fn len() -> Value {
+    fn execute(scope: Ref<Scope>, span: Span) -> Result<Value> {
+        let (val,) = get_args!(scope, span, val);
+        Ok(Value::Integer(match val {
+            Value::String(str) => str.chars().count() as isize,
+            Value::Array(vals) | Value::Tuple(vals) => vals.borrow().len() as isize,
+            Value::Iterator(iter) => iter.clone().count() as isize,
+            _ => {
+                return Err(
+                    BuiltinError("Cannot get length of passed argument".to_string())
+                        .make(span)
+                        .into(),
+                )
+            }
+        }))
+    }
+    RuseBuiltIn::new("len")
         .with_arg(BuiltInFunctionArg::Positional("val"))
         .finish(Box::new(execute))
 }
@@ -92,7 +184,7 @@ impl RuseBuiltIn {
         self
     }
 
-    fn finish(self, f: BuiltInFunction) -> Ref<Function> {
+    fn finish(self, f: BuiltInFunction) -> Value {
         let span = Span::empty();
         let run = FunctionRun::BuiltIn(f);
         let mut args = IndexMap::new();
@@ -111,12 +203,12 @@ impl RuseBuiltIn {
             };
             args.insert(name.to_string(), arg);
         }
-        ref_it!(Function {
+        Value::Function(ref_it!(Function {
             span,
             name: Some(self.name),
             args,
             scope: None,
             run,
-        })
+        }))
     }
 }

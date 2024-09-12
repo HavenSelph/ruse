@@ -101,7 +101,7 @@ impl<'r, 'i> Repl<'r, 'i> {
         match val {
             Value::None => {}
             _ => {
-                println!("{val}");
+                println!("{val:?}");
                 self.scope.borrow_mut().set("_", val, Span::empty());
             }
         }

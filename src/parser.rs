@@ -690,6 +690,14 @@ impl<'contents> Parser<'contents> {
         let mut lhs = self.parse_atom()?;
         loop {
             match self.current.kind {
+                TokenKind::Period => {
+                    self.advance();
+                    let field = self.consume_one(TokenKind::Identifier)?;
+                    let span = lhs.span.extend(field.span);
+                    lhs = NodeKind::FieldAccess(lhs, field.text.to_string())
+                        .make(span)
+                        .into();
+                }
                 TokenKind::LeftBracket => {
                     self.advance();
                     let idx = self.parse_expression()?;

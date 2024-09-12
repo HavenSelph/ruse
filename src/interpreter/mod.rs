@@ -10,7 +10,7 @@ use std::fmt::{Display, Formatter};
 use std::rc::Rc;
 use InterpreterReport::*;
 
-mod builtin;
+pub mod builtin;
 pub mod scope;
 pub mod value;
 
@@ -66,15 +66,25 @@ impl Interpreter {
             ($($func_path:path),+$(,)?) => {
                 $(
                 let func = $func_path();
-                let name = func.borrow().name.clone().unwrap();
+                let Value::Function(ref inner) = func else {unreachable!()};
+                let name = inner.borrow().name.clone().unwrap();
                 scope
                     .borrow_mut()
-                    .declare(&name, Value::Function(func), Span::empty())
+                    .declare(&name, func, Span::empty())
                     .ok();
                 )+
             };
         }
-        register_builtins!(builtin::print, builtin::debug, builtin::iter);
+        register_builtins!(
+            builtin::print,
+            builtin::debug,
+            builtin::iter,
+            builtin::str,
+            builtin::array,
+            builtin::tuple,
+            builtin::range,
+            builtin::len,
+        );
         scope
     }
 
@@ -121,6 +131,10 @@ impl Interpreter {
         }
 
         match &node.kind {
+            NodeKind::FieldAccess(..) => {
+                // let lhs = self.run(expr, scope.clone())?;
+                todo!("uh oh")
+            }
             NodeKind::For(init, cond, loop_expr, body) => {
                 let scope = Scope::new(Some(scope.clone()));
                 if let Some(init) = init {
@@ -345,9 +359,16 @@ impl Interpreter {
         scope: Ref<Scope>,
         span: Span,
     ) -> Result<Value> {
-        let callee = self.run(node, scope.clone())?;
         let mut args = Vec::with_capacity(call_args.len());
         let mut seen_keyword = false;
+        let callee = match &node.kind {
+            NodeKind::FieldAccess(expr, key) => {
+                let self_arg = self.run(expr, scope.clone())?;
+                args.push(value::CallArg::Positional(expr.span, self_arg));
+                scope.borrow().get(key, span)?
+            }
+            _ => self.run(node, scope.clone())?,
+        };
         for arg in call_args.iter() {
             match arg {
                 CallArg::Positional(span, node) => match &node.kind {

@@ -36,7 +36,7 @@ fn run_file(
     reporter.check_reports();
 
     let val = interpreter.run_block(ast.as_ref(), scope).unwrap_report();
-    dprintln!("{val}");
+    dprintln!("{val:?}");
 }
 
 fn main() {

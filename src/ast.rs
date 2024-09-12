@@ -61,6 +61,7 @@ pub enum NodeKind {
         args: Vec<FunctionArg>,
         body: Box<Node>,
     },
+    FieldAccess(Box<Node>, String),
     Subscript(Box<Node>, Box<Node>),
     ArrayLiteral(Vec<Node>),
     TupleLiteral(Vec<Node>),
@@ -200,6 +201,9 @@ impl<'a> Display for NodeFormatter<'a> {
         let node = self.node;
         write!(f, "{}", node.kind.variant_name())?;
         match &node.kind {
+            NodeKind::FieldAccess(expr, field) => {
+                writeln!(f, "({field}) {{\n{}\n}}", self.child(expr))?;
+            }
             NodeKind::For(init_expr, condition_expr, loop_expr, body) => {
                 writeln!(f, " {{\t\nInitializer {{")?;
                 match init_expr {
